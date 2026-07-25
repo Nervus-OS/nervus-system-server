@@ -60,6 +60,17 @@ type Component struct {
 	Interfaces   []string        `json:"interfaces,omitempty"`
 	IdleTimeout  int             `json:"idle_timeout_sec,omitempty"`
 	Limits       ComponentLimits `json:"limits,omitempty"`
+
+	// Privileged / Capabilities / AddressFamilies 是组件请求的 Linux 层特权。
+	//
+	// 本工具【只透传不裁决】：合法性由内核的白名单判定（pkgregistry/
+	// privilege.go），能不能真拿到由内核按包来源判定（只有系统镜像包拿得到）。
+	// 这里加字段只是为了让严格 JSON 解码认识它们——不加的话，一个填了
+	// privileged 的 manifest 在打包这一步就以 "unknown field" 失败，
+	// 而那个错误看起来像模板写错了。
+	Privileged      bool     `json:"privileged,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	AddressFamilies []string `json:"address_families,omitempty"`
 }
 
 // Export 声明本组件对外提供的接口。
