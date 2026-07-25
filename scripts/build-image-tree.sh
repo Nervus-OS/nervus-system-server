@@ -39,6 +39,7 @@ esac
 # 加服务时在这里加一行即可。
 SERVICES=(
 	"nervus.pkgmanagerd:pkgmanagerd"
+	"nervus.safety.recovery:safetyrecoveryd"
 )
 
 echo "==> 目标 ABI: $ABI (GOARCH=$GOARCH)"

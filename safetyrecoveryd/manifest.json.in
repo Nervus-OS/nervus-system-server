@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "package_id": "nervus.safety.recovery",
+  "label": "Nervus Safety Recovery",
+  "version": "0.1.0",
+  "version_code": 1,
+  "min_nervus_api": 1,
+  "target_nervus_api": 1,
+  "supported_abis": ["linux-arm64"],
+  "permissions": [
+    "perm.safety.observe",
+    "perm.safety.rearm"
+  ],
+  "components": [
+    {
+      "id": "main",
+      "type": "service",
+      "runtime": "native",
+      "entry": "bin/safetyrecoveryd",
+      "launch_mode": "always-on",
+      "criticality": "optional",
+      "interfaces": [
+        "nervus.interface.safety.control"
+      ],
+      "limits": {
+        "memory_max_mb": 64,
+        "tasks_max": 32
+      }
+    }
+  ],
+  "digests": {}
+}
