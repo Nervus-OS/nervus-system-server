@@ -77,7 +77,7 @@ for entry in "${SERVICES[@]}"; do
 	trap 'rm -f "$tmplTmp"' EXIT
 	sed "s/\"linux-arm64\"/\"$ABI\"/" "$tmpl" > "$tmplTmp"
 
-	go run ./tools/sysmanifest -dir "$dir" -template "$tmplTmp" -key "$KEY"
+	go run ./scripts/sysmanifest -dir "$dir" -template "$tmplTmp" -key "$KEY"
 	rm -f "$tmplTmp"
 done
 

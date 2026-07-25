@@ -11,29 +11,53 @@ App (Kotlin/Compose)  ──IPC──▶  系统服务 (本仓库, Go)  ──ad
 
 ## 布局：一个服务一个目录
 
+**根目录下每一个目录就是一个系统服务**，目录里直接放该服务的代码。
+唯一的例外是 `scripts/`，它装构建工具。
+
 ```text
 nervus-system-server/
-├── pkgmanagerd/          软件安装服务（见其 README）
-│   ├── main.go           进程入口
-│   ├── service.go        业务实现
-│   ├── adminclient.go    管理通道客户端（只有本服务可用）
-│   ├── unpack.go         .nspkg 解包 + tar-slip 防护
-│   ├── manifest.json.in  包清单模板
+├── pkgmanagerd/            ← 服务
+│   ├── main.go             进程入口
+│   ├── service.go          业务实现
+│   ├── adminclient.go      管理通道客户端（只有本服务可用）
+│   ├── unpack.go           .nspkg 解包 + tar-slip 防护
+│   ├── manifest.json.in    包清单模板
 │   └── README.md
-├── tools/sysmanifest/    digest 计算 + manifest 填充 + Ed25519 签名
-└── scripts/
+├── sessiond/               ← 服务（待落地）
+└── scripts/                构建工具，不是服务
     ├── build-image-tree.sh
-    └── sync-ipc.sh
+    ├── sync-ipc.sh
+    └── sysmanifest/        digest 计算 + manifest 填充 + Ed25519 签名
 ```
 
-每个服务是一个独立的 `package main`，**自带 manifest 模板与 README**。
+**服务目录名不得冲突**：它同时是二进制名、Go 包路径、以及 `build-image-tree.sh`
+里的构建目标。
 
-这不只是为了整齐：`pkgmanagerd/adminclient.go` 是管理通道的客户端，而内核只放行
-pkgmanagerd 一个 UID。把它放在服务自己的包里，别的服务想用都 import 不到——
-「只有 pkgmanagerd 能碰管理通道」这条约束因此是**结构性**的，不靠自觉。
+### 服务之间不能互相 import —— 由编译器保证
 
-（与 `nervud` 的布局不同是有原因的：那个仓库有一个主二进制，所以 `main.go` 在根、
-`cmd/` 放附属工具。这里没有主次之分，是 N 个平级服务。）
+本仓库**每一个 `.go` 文件都是 `package main`**，包括 `scripts/sysmanifest`。
+Go 禁止 import `package main`，所以：
+
+- 服务 A 想 import 服务 B —— **编译期就过不去**
+- 谁想 import 构建工具 —— 同样过不去
+
+这不是靠约定或 code review 维持的，是语言层挡着。一个服务的一切都在它自己
+那个目录里：代码、manifest 模板、README。
+
+这条性质有个具体的安全收益：`pkgmanagerd/adminclient.go` 是管理通道的客户端，
+而内核只放行 pkgmanagerd 一个 UID 连那条 socket。放在服务自己的包里，别的服务
+**想用都 import 不到**——「只有 pkgmanagerd 能碰管理通道」因此是结构性约束。
+如果它在一个共享包里，别的服务就能写出编译通过、运行时被内核拒的代码，
+而那种失败排查起来远比编译错误费劲。
+
+需要共享代码时，正确做法是把它放进 `nervus-ipc`（协议与 SDK 的家）或另起一个
+被明确设计成公共依赖的仓库，**不是**在本仓库里开一个共享包。
+
+`scripts/` 装构建工具，不是服务，也不参与镜像产物。`nervud` 仓库同样有一个
+`scripts/`，此处沿用同一约定。
+
+（与 `nervud` 的目录布局不同是有原因的：那个仓库有一个主二进制，所以 `main.go`
+在根、`cmd/` 放附属工具。这里没有主次之分，是 N 个平级服务。）
 
 ## 部署位置
 
@@ -106,10 +130,10 @@ cp -r <输出目录>/* /usr/lib/nervus/system-packages/
 openssl genpkey -algorithm ed25519 -out signing/platform-release.pem
 ```
 
-`tools/sysmanifest` 用 Go 写而不是调 `nervus-packaging` 的 Kotlin `signing-lib`：
+`scripts/sysmanifest` 用 Go 写而不是调 `nervus-packaging` 的 Kotlin `signing-lib`：
 本仓库是纯 Go，`manifest.sig` 只是 JSON + Ed25519，标准库直接能产，没必要为签名
 往构建里拖一条 JVM 工具链。代价是格式定义有两份，靠
-`tools/sysmanifest/manifest_test.go` 的断言锁住漂移。
+`scripts/sysmanifest/manifest_test.go` 的断言锁住漂移。
 
 ### 开发期没有平台根也能跑
 
