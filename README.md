@@ -53,8 +53,30 @@ Go 禁止 import `package main`，所以：
 需要共享代码时，正确做法是把它放进 `nervus-ipc`（协议与 SDK 的家）或另起一个
 被明确设计成公共依赖的仓库，**不是**在本仓库里开一个共享包。
 
-`scripts/` 装构建工具，不是服务，也不参与镜像产物。`nervud` 仓库同样有一个
-`scripts/`，此处沿用同一约定。
+### scripts/ 里是什么
+
+`scripts/` 装**构建工具**，不是服务，也不会被打进镜像产物。`nervud` 仓库同样有
+一个 `scripts/`，此处沿用同一约定。
+
+| 文件 | 做什么 |
+|---|---|
+| `build-image-tree.sh` | **交叉编译全部服务 → 计算 digest → 签名 → 摆成可直接拷进系统镜像的目录树**。产物只有二进制 + manifest.json + manifest.sig，不含源码 |
+| `sysmanifest/` | 上面那一步里「算 digest、填 manifest、Ed25519 签名」的 Go 实现，由 `build-image-tree.sh` 用 `go run` 调 |
+| `sync-ipc.sh` | 同步 `nervus-ipc` 依赖版本，并强制与 nervud 指向同一 commit |
+
+**发布形态是二进制，不是源码。**内核（nervud）和系统服务都是提前编译好的：
+
+```sh
+# 构建机上（交叉编译到目标 ABI）
+scripts/build-image-tree.sh ./out signing/platform-release.pem linux-arm64
+
+# 产物直接拷进镜像
+cp -r ./out/* <镜像挂载点>/usr/lib/nervus/system-packages/
+```
+
+目标机上不需要 Go 工具链、不需要源码、不需要联网——只有一个静态链接的二进制
+（`CGO_ENABLED=0`）加两份元数据。这也是为什么 digest 与签名必须在构建期算好：
+目标机没有任何东西可以拿来重新计算。
 
 （与 `nervud` 的目录布局不同是有原因的：那个仓库有一个主二进制，所以 `main.go`
 在根、`cmd/` 放附属工具。这里没有主次之分，是 N 个平级服务。）
@@ -94,6 +116,40 @@ cp -r <输出目录>/* /usr/lib/nervus/system-packages/
 
 产物是**解包后的目录树，不是 `.nspkg`**。后者是动态安装用的 zstd+tar 格式，
 两条路不能混。
+
+## 启动顺序：随机，服务必须自己扛住
+
+`service.Manager.Start()` 遍历 `pkgs.List()`，而那个函数遍历的是一个 Go map。
+**Go 运行时刻意随机化 map 迭代顺序**——所以系统服务的启动顺序不是「碰巧无序」，
+而是每次开机都不同。
+
+内核也没有提供依赖声明机制（没有 `After=` 之类）。这是合理的：服务之间互相
+import 不了，唯一的共同依赖是 nervud 自己。
+
+### 一个必须知道的竞态
+
+`service` 模块在内核里注册于第 8 位，`ipc` 在第 12 位——**组件被拉起时，控制面
+socket 可能还没开始 listen**。
+
+因此每个服务的正确写法是：**连不上就直接失败退出**，让 nervud 的 supervisor
+按指数退避重启。不要自己写重试循环——那会掩盖「nervud 没起来」这个事实，
+让进程看起来健康。
+
+崩溃预算烧不完，可以放心退出：
+
+```
+退避序列 1s → 2s → 4s → 8s，崩溃时刻 ≈ t = 0, 1, 3, 7, 15
+熔断阈值 = 10 秒滑动窗口内 5 次
+
+t=7   第 4 次，窗口 [-3,7] 内有 0,1,3,7 → 4 < 5  ✅
+t=15  第 5 次，窗口 [5,15] 内只有 7,15  → 2 < 5  ✅
+```
+
+指数退避配滑动窗口，永远凑不满 5 次。实际上 ipc 在 service 之后几毫秒就 listen
+了，而 systemd 拉起进程要走一次 D-Bus 往返，这个竞态大概率根本不触发。
+
+**但 `criticality: vital` 的服务要当心**：真熔断了会触发 Safety 锁存让整机停下来。
+除非这个服务停了机器就不该动，否则用默认的 `optional`。
 
 ## 服务清单
 

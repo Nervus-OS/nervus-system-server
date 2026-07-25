@@ -34,8 +34,11 @@ const componentID = "main"
 
 // interfaceID 是本服务提供的接口。
 //
-// 【暂定】：这个接口的 .proto 还没进 nervus-ipc。落地后要按 method_registry
-// 机制挂 method_meta，届时此处与 method_id 一并对齐，以 proto 为准。
+// 必须与 manifest.json 的 components[].exports[].interface 一致——内核
+// RegisterEndpoint 步骤 2 会拿它去 manifest 里查，查不到即 PERMISSION_DENIED
+// （"interface not declared in manifest exports"）。
+//
+// 接口定义见 nervus-ipc 的 proto/nervus/interface/pkgmanager/v1/pkg_manager.proto。
 const interfaceID = "nervus.interface.pkg.manager"
 
 func main() {
@@ -103,9 +106,9 @@ func run(sockPath, adminSock string, log *slog.Logger) error {
 		// 校验它必须是 Resource Registry 里的已知句柄；本接口不绑任何物理资源，
 		// 填一个反而会因为不在表里被 INVALID_ARGUMENT 拒掉。
 		//
-		// SchemaHash 留空：本接口的 .proto 还没进 nervus-ipc。内核步骤 5 目前
-		// 【只记录不比对】（v1 尚无权威 schema Registry），所以现在留空不会被拒；
-		// 但 schema Registry 落地后比对会开启，届时必须填上真实 hash。
+		// SchemaHash 留空：内核步骤 5 目前【只记录不比对】（v1 尚无权威 schema
+		// Registry）。schema Registry 落地后比对会开启，届时必须填上本接口
+		// descriptor 的真实 hash，否则注册不上。
 	})
 	if err != nil {
 		return fmt.Errorf("注册 endpoint: %w", err)
@@ -136,39 +139,4 @@ func run(sockPath, adminSock string, log *slog.Logger) error {
 		}
 		return nil
 	}
-}
-
-// registerHandlers 把方法接到业务实现上。
-//
-// # 现状：一个 handler 都不注册，这是有意的
-//
-// nervus.interface.pkg.manager 的 .proto 还没进 nervus-ipc，没有生成类型可用。
-// 而手搓一套临时的 payload 编码是明确的红线（绝不手搓信封）——临时格式最后
-// 都会变成永久格式，还没有 golden vectors 兜着。
-//
-// 也没有注册一批「返回未实现」的占位 handler：协议的 StatusCode 里根本没有
-// UNIMPLEMENTED，硬凑一个语义相近的码只会误导调用方（UNAVAILABLE 意味着
-// 「稍后重试」，而这里重试多少次都一样）。SDK 对未注册的 method_id 本来就
-// fail closed 回 NOT_FOUND —— 「这个方法不存在」正是此刻的事实，不需要包装。
-//
-// 于是现在这条链能验到：服务起得来、握得上手、报得了到、能被 App Resolve 到，
-// 调用任何方法得到一个准确的 NOT_FOUND。proto 落地后在这里逐个 Handle 即可，
-// 服务骨架不用动。
-func registerHandlers(host *sdk.ServiceHost, svc *Service, log *slog.Logger) {
-	log.Info("pkgmanagerd: no method handlers registered yet",
-		"reason", "nervus.interface.pkg.manager proto not landed in nervus-ipc",
-		"effect", "calls return NOT_FOUND")
-
-	// proto 落地后在此处接线，形如：
-	//
-	//	host.Handle(MethodInstall, func(cc sdk.CallContext, p []byte) ([]byte, error) {
-	//	    var req pkgv1.InstallRequest
-	//	    if err := proto.Unmarshal(p, &req); err != nil {
-	//	        return nil, &sdk.StatusError{Code: ipcv1.StatusCode_STATUS_CODE_INVALID_ARGUMENT}
-	//	    }
-	//	    info, err := svc.InstallFromFile(req.GetNspkgPath())
-	//	    ...
-	//	})
-	_ = host
-	_ = svc
 }

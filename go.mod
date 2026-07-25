@@ -8,3 +8,5 @@ require (
 )
 
 require google.golang.org/protobuf v1.36.11 // indirect
+
+replace github.com/nervus-os/nervus-ipc/go => ../nervus-ipc/go

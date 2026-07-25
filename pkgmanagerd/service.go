@@ -17,22 +17,26 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	pkgv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/pkgmanagerv1"
 )
 
-// Method ID。与 nervus.interface.pkg.manager 接口的 method_id 枚举对应。
+// Method ID 直接取自 proto 生成的枚举，【不在本地重抄一份常量】。
 //
-// 【暂定值】。这个接口的 .proto 还没进 nervus-ipc——它需要先按 A 组的
-// method_registry 机制挂上 method_meta（权限、风险级、是否需确认），
-// 才谈得上冻结。在那之前这里是本地常量，proto 落地后必须回来对齐，
-// 且以 proto 为准。
-const (
-	MethodInstall       uint32 = 1
-	MethodUninstall     uint32 = 2
-	MethodList          uint32 = 3
-	MethodSetEnabled    uint32 = 4
-	MethodSetPermission uint32 = 5
+// 抄一份的代价不是重复，是它会悄悄过期：proto 改了 method_id，本地常量不会
+// 报错，只会让调用路由到错误的方法——而那是运行期才发现的、看起来像
+// 「功能不对」的故障。用生成枚举的话，proto 改名/改号在编译期就撞出来。
+var (
+	methodInstall  = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_INSTALL)
+	methodUninstal = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_UNINSTALL)
+	methodList     = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_LIST)
+	methodSetComp  = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_SET_COMPONENT_ENABLED)
 )
 
 // Service 是 pkgmanagerd 的业务实现。
@@ -46,14 +50,52 @@ func newService(admin *Client, log *slog.Logger) *Service {
 	return &Service{admin: admin, log: log}
 }
 
-// InstallFromFile 执行一次完整的安装：向 nervud 要 staging 目录、把 .nspkg
+// dataRoot 是本服务的私有数据目录，也是与 App 交接 .nspkg 的唯一位置。
+//
+// 由内核在安装本包时创建，属主为本包 UID、权限 0700，并且是沙箱里【唯一可写】
+// 的路径（systemd 的 ReadWritePaths 只列了它）。WorkingDirectory 也是它。
+const dataRoot = "/var/lib/nervus/package-data/nervus.pkgmanagerd"
+
+// ErrUnsafeRelPath 调用方给的路径试图逃出交接目录。
+var ErrUnsafeRelPath = errors.New("nspkg_relpath escapes the handoff directory")
+
+// InstallFromRelPath 执行一次完整的安装：向 nervud 要 staging 目录、把 .nspkg
 // 解包进去、再让 nervud 复核并提交。
 //
-// nspkgPath 由调用方（App）给出。本服务【不校验它的内容】——那是 nervud 的活。
-// 但要注意：调用方能指定任意路径，而本服务跑在自己的沙箱里，能读到的只有
-// 自己的私有数据目录与只读的系统区。App 想装的包必须先落到双方都能访问的
-// 位置，这个交接约定属于接口层，不在本函数。
-func (s *Service) InstallFromFile(nspkgPath string) (*PackageInfo, error) {
+// relPath 是【交接目录内的相对路径】，不是绝对路径。协议这么定不是洁癖：
+// 本服务跑在 ProtectSystem=strict 的沙箱里，能读到的只有自己的数据目录，
+// 一个它读不到的绝对路径只会得到含义模糊的「打不开」。
+//
+// 路径校验在这里做一次（拒绝绝对路径与 ".." 逃逸），nervud 侧还会再做一次。
+// 两道是有意的：本服务的进程内可能有别的 bug 把 relPath 改坏，而 nervud 那道
+// 是跨信任边界的最终防线。
+func (s *Service) InstallFromRelPath(relPath string) (*PackageInfo, error) {
+	nspkgPath, err := resolveHandoff(relPath)
+	if err != nil {
+		return nil, err
+	}
+	return s.installFile(nspkgPath)
+}
+
+// resolveHandoff 把交接目录内的相对路径解析成绝对路径，拒绝一切逃逸。
+func resolveHandoff(relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("%w: empty", ErrUnsafeRelPath)
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("%w: %q is absolute", ErrUnsafeRelPath, relPath)
+	}
+	full := filepath.Join(dataRoot, relPath)
+	cleaned := filepath.Clean(full)
+	// 前缀比较【带分隔符】，否则 /var/lib/nervus/package-data/nervus.pkgmanagerd-evil
+	// 会混过朴素前缀检查。
+	if !strings.HasPrefix(cleaned, dataRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: %q", ErrUnsafeRelPath, relPath)
+	}
+	return cleaned, nil
+}
+
+func (s *Service) installFile(nspkgPath string) (*PackageInfo, error) {
 	// 1. 让 nervud 建 staging 目录。
 	//
 	// 【必须由 nervud 建，不能自己挑一个】。它保证三件事：位置与 PackageRoot
