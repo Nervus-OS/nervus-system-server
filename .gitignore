@@ -1,0 +1,13 @@
+# 构建产物
+/out/
+/bin/
+
+# 签名私钥【绝不能进 git】。系统包的签名密钥泄漏 = 任何人都能造出被内核
+# 当作 platform-release 信任的包。
+/signing/
+*.pem
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
