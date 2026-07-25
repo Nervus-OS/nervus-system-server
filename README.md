@@ -9,6 +9,9 @@ App (Kotlin/Compose)  ──IPC──▶  系统服务 (本仓库, Go)  ──ad
                                    nervus-ipc/go/sdk
 ```
 
+> **要新写一个服务？** 看 **[WRITING-A-SERVICE.md](WRITING-A-SERVICE.md)** ——
+> 从建目录到部署上机的完整流程，附按症状查的失败对照表。
+
 ## 布局：一个服务一个目录
 
 **根目录下每一个目录就是一个系统服务**，目录里直接放该服务的代码。
