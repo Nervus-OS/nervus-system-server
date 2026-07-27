@@ -44,8 +44,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	safetyv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/safetyv1"
-	"github.com/nervus-os/nervus-ipc/go/sdk"
+	safetyv1 "github.com/nervus-os/nervus-ipc/protocol/interface/safetyv1"
+	"github.com/nervus-os/nervus-ipc/sdk"
 )
 
 // componentID 必须与 manifest.json 的 components[].id 一致。

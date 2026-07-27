@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nervus-os/nervus-ipc/go/sdk"
+	"github.com/nervus-os/nervus-ipc/sdk"
 )
 
 // componentID 必须与 manifest.json 里 components[].id 一致。

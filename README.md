@@ -6,7 +6,7 @@ Nervus OS（NSOS）的**系统服务层**。这些服务随系统镜像发布，
 ```text
 App (Kotlin/Compose)  ──IPC──▶  系统服务 (本仓库, Go)  ──adminwire──▶  nervud
                                         │
-                                   nervus-ipc/go/sdk
+                                   nervus-ipc/sdk
 ```
 
 > **要新写一个服务？** 看 **[WRITING-A-SERVICE.md](WRITING-A-SERVICE.md)** ——
@@ -221,7 +221,7 @@ go test ./...
 
 ## 红线
 
-1. **绝不手搓信封。** IPC 一律经 `nervus-ipc/go/sdk`，它复用冻结 proto 的生成类型。
+1. **绝不手搓信封。** IPC 一律经 `nervus-ipc/sdk`，它复用冻结 proto 的生成类型。
 2. **安全判定不在本仓库。** 授权、验签、裁决全在 nervud。在这里写出任何形如
    「如果……就允许」的代码都是设计错误。
 3. **发 body 之前查表。** `nervus-ipc` 根 README 的「实现状态」表是唯一权威依据——

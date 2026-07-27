@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	pkgv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/pkgmanagerv1"
+	pkgv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
 )
 
 // Method ID 直接取自 proto 生成的枚举，【不在本地重抄一份常量】。

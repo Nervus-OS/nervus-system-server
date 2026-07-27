@@ -12,9 +12,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pkgv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/pkgmanagerv1"
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
-	"github.com/nervus-os/nervus-ipc/go/sdk"
+	pkgv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
+	"github.com/nervus-os/nervus-ipc/sdk"
 )
 
 // registerHandlers 把四个方法接到业务实现上。

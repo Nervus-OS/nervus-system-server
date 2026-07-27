@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	pkgv1 "github.com/nervus-os/nervus-ipc/go/protocol/interface/pkgmanagerv1"
-	ipcv1 "github.com/nervus-os/nervus-ipc/go/protocol/ipcv1"
+	pkgv1 "github.com/nervus-os/nervus-ipc/protocol/interface/pkgmanagerv1"
+	ipcv1 "github.com/nervus-os/nervus-ipc/protocol/ipcv1"
 )
 
 func TestResolveHandoff_RejectsEscapes(t *testing.T) {
