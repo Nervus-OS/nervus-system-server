@@ -1,0 +1,39 @@
+name: Go PR checks
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, vet, and test
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/nervus-os/*
+      GONOSUMDB: github.com/nervus-os/*
+      GOPROXY: direct
+    steps:
+      - name: Checkout nervus-system-server
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Race test
+        run: go test ./... -race

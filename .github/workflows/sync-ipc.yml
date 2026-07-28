@@ -1,0 +1,60 @@
+name: Sync IPC dependency
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "nervus-ipc ref to sync"
+        required: false
+        default: master
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Update nervus-ipc
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/nervus-os/*
+      GONOSUMDB: github.com/nervus-os/*
+      GOPROXY: direct
+    steps:
+      - name: Checkout nervus-system-server
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Sync module
+        run: |
+          ref="${{ github.event.inputs.ref || 'master' }}"
+          GOFLAGS=-mod=mod go get "github.com/nervus-os/nervus-ipc@${ref}"
+          go mod tidy
+
+      - name: Validate updated dependency
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: codex/sync-nervus-ipc
+          delete-branch: true
+          commit-message: "chore: sync nervus-ipc dependency"
+          title: "chore: sync nervus-ipc dependency"
+          body: |
+            Automated update of `github.com/nervus-os/nervus-ipc`.
+
+            This PR is opened only when `go.mod` or `go.sum` changes after syncing
+            the IPC module and running `go mod tidy`.
+          labels: dependencies, automated
