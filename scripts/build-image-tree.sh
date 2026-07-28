@@ -86,4 +86,3 @@ echo
 echo "==> 产物"
 find "$OUT" -type f | sort | sed 's|^|  |'
 echo
-echo "部署：把 $OUT/* 拷进目标机的 /usr/lib/nervus/system-packages/"
