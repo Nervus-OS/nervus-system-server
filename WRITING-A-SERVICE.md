@@ -490,6 +490,108 @@ UDS 适合控制与小消息；大流量走第 7 节的 Transfer。
 
 ---
 
+## 7.5 长任务：Operation
+
+一次调用要花 10 秒（机械臂轨迹、回零、导航到点）时，普通 `Request/Response`
+不够用。
+
+### 先判断你是不是真的需要它
+
+普通调用的隐含约定是**响应到达 = 事情做完了**。设置速度、读状态这类瞬间完成
+的事完全够用，不要套 Operation。
+
+| 你想让调用方知道 | 用 |
+|---|---|
+| 设备现在什么样（在哪、速度多少） | 普通只读方法 + 状态事件 |
+| 我那次调用跑完没有、成没成 | Operation |
+
+两者互补，不是替代。`basemotion.proto` 里 `GetMotionState` 与轨迹类
+Operation 会同时存在。
+
+**如果一个能力只有一个控制方、动作不需要取消、失败原因不要紧**，状态方法就够
+了。Operation 是为「多控制方 + 需要取消 + 需要可靠的失败原因」准备的。
+
+那三条为什么绑在一起，看这个场景：A 发起一条 10 秒轨迹，第 3 秒操作员（人，
+优先级更高）抢占租约并发起另一条动作。只有状态方法时 A 看到的是
+`MOVING → MOVING → READY`——它无从知道自己那次失败了，甚至会以为成功了。
+
+### 时序
+
+```
+App --Request(声明了 returns_operation 的方法)--> nervud
+                nervud 建 Operation(PENDING)，operation_id 进 ExecutionContext
+                nervud --Dispatch--> 你的服务
+                nervud <--DispatchResult{ACCEPTED}-- 你的服务
+App <--Response{ACCEPTED, OperationHandle}-- nervud
+                nervud <--ReportProgress / CompleteOperation-- 你的服务
+App <--OperationChanged(订阅事件)-- nervud
+```
+
+**Operation 在 Dispatch 之前就存在**，所以你收到 Dispatch 时
+`ExecutionContext.operation_id` 已经有效，可以直接回 `ACCEPTED`。
+
+### 提供侧要做什么
+
+1. 方法的 `MethodMeta` 声明 `returns_operation: true`
+2. handler 收下请求、**立刻返回**（回 `ACCEPTED`，`payload` 留空），把活交给
+   自己的 goroutine
+3. 真正开始动时调 `AcceptOperation`（PENDING → RUNNING）
+4. 中途调 `ReportProgress`
+5. 结束时调 `CompleteOperation`
+
+三个上报方法都在 `nervus.interface.operation.control@1` 上，Resolve 一次即可，
+与 Transfer Control 同形。
+
+> ⚠️ **`Success.payload` 必须留空**
+>
+> `operation_id` 由 nervud 分配、状态机也归 nervud。你自己写一个句柄，调用方
+> 拿到的编号 nervud 不认识——取消永远取消不到、进度永远收不到，**而两边都
+> 不报错**。内核会拒掉带 payload 的 ACCEPTED。
+
+> ⚠️ **`AcceptOperation` 要带回 `motion_epoch`**
+>
+> 从收到 Dispatch 到真正开始动之间可能隔着几百毫秒的准备时间，而那段时间足以
+> 发生一次 Safety 停机。不带回来校验的话，你会基于一份已经作废的授权开始运动。
+
+> ⚠️ **终态只写一次**
+>
+> 重复 `CompleteOperation` 返回 `FAILED_PRECONDITION` + `ALREADY_TERMINAL`。
+> 幂等地静默接受第二次会掩盖一类真实故障：你的服务里有两条路径都认为自己该
+> 结束这次执行，而它们可能给出相反的结论。
+
+### 消费侧要做什么
+
+`Response` 的 `payload` 是 `OperationHandle`。拿到 `operation_id` 之后：
+
+- **订阅** `OperationChanged` 持续观察（正常路径）
+- `GetOperation` 拉一次（补两个窗口：刚拿到句柄还没订阅那一小段，以及断线
+  重连后「我走的时候它还在跑」）
+- `CancelOperation` 请求取消
+
+> ⚠️ **订阅必须带 `OperationSubscription{operation_id}`**
+>
+> 本接口只有一个内建 endpoint，全机所有 operation 的事件都从它出来。不指定就
+> 会被拒——nervud 在 Subscribe 时就裁决可见性，订一个不属于自己的直接失败。
+
+> ⚠️ **`CancelOperation` 是请求，不是命令**
+>
+> 返回成功只表示 nervud 已把状态置为 `CANCEL_REQUESTED` 并通知了你的服务。
+> 机械臂物理上停下来需要时间，真正的终态（`CANCELLED`，或者「来不及了，已经
+> `SUCCEEDED`」）由后续事件给出。做成同步的「取消完成」会是一句谎话。
+
+### 它不是「高速通道」
+
+Operation 跟速度、优先级都没关系，也不是专线。所有东西走同一条 UDS。真正管
+「快」的是另外三样：
+
+| 机制 | 管什么 |
+|---|---|
+| Safety Lane | 急停。独立通道，不排队 |
+| Transfer 数据面 | 大数据。摄像头帧不进控制面（第 7 节） |
+| ControlLease + 抢占 | 谁有资格动机器 |
+
+---
+
 ## 8. 构建、签名、部署
 
 ```sh
