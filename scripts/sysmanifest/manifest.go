@@ -79,6 +79,22 @@ type Export struct {
 	Visibility string `json:"visibility,omitempty"`
 }
 
+// ProviderArtifactsRef 指向包内的数据驱动 Provider 契约，对应内核
+// pkgregistry.ProviderArtifactsRef。
+//
+// Descriptor 是 ProviderDescriptor 的确定性 protobuf bytes，Schemas 是
+// InterfaceSchemaBundleSet 的确定性 protobuf bytes。两个文件由服务自己的
+// providergen 产出（见 <服务目录>/providergen/），本工具只负责把它们算进
+// digests 并写进 manifest。
+//
+// 【导出接口的包必须有它】：内核 loadRequiredProviderArtifacts 对
+// 「有 exports 却没有 provider」直接返回 ErrProviderArtifactsRequired。
+// 唯一的例外是 nervus.pkgmanagerd 的兼容桥，而那条桥正在被拆掉。
+type ProviderArtifactsRef struct {
+	Descriptor string `json:"descriptor"`
+	Schemas    string `json:"schemas"`
+}
+
 // ComponentLimits 是组件的资源上限，会被翻成 systemd 的
 // MemoryMax / CPUQuotaPerSecUSec / TasksMax。零值表示不设该项。
 type ComponentLimits struct {
@@ -101,7 +117,11 @@ type Manifest struct {
 	SupportedABIs   []string          `json:"supported_abis"`
 	Permissions     []string          `json:"permissions,omitempty"`
 	Components      []Component       `json:"components"`
-	Digests         map[string]string `json:"digests"`
+	// Provider 的 json tag 必须与内核 pkgregistry.Manifest 的 `provider,omitempty`
+	// 完全一致。内核用 DisallowUnknownFields 解析，拼错一个字母就是一句含义
+	// 模糊的 decode 失败
+	Provider *ProviderArtifactsRef `json:"provider,omitempty"`
+	Digests  map[string]string     `json:"digests"`
 }
 
 // Signature 与 SignatureBlock 对应内核 pkgregistry 的同名类型。
@@ -307,6 +327,51 @@ func validateManifest(m Manifest) error {
 		if _, ok := m.Digests[c.Entry]; !ok {
 			return fmt.Errorf("component %q: entry %q 未被 digests 覆盖", c.ID, c.Entry)
 		}
+	}
+
+	return validateProvider(m)
+}
+
+// validateProvider 复核 Provider 契约的形状，与内核 pkgregistry 的两处校验对齐：
+// manifest.go 的路径/digest 检查，以及 provider_artifacts.go 的
+// 「有 exports 就必须有 provider」。
+//
+// 在这里挡下来的意义与本文件其它校验相同：内核发现同样的问题是在装载时，
+// 那时镜像已经烧好，而错误信息（ErrProviderArtifactsRequired）离「模板漏了一段」
+// 这个真实原因很远。
+func validateProvider(m Manifest) error {
+	if m.Provider == nil {
+		for _, c := range m.Components {
+			if len(c.Exports) != 0 {
+				return fmt.Errorf(
+					"component %q 导出了接口，但 manifest 没有 provider 段"+
+						"（内核会以 ErrProviderArtifactsRequired 拒绝装载）", c.ID)
+			}
+		}
+		return nil
+	}
+
+	for _, ref := range []struct {
+		label string
+		rel   string
+	}{
+		{"provider.descriptor", m.Provider.Descriptor},
+		{"provider.schemas", m.Provider.Schemas},
+	} {
+		if ref.rel == "" {
+			return fmt.Errorf("%s 不能为空", ref.label)
+		}
+		if strings.HasPrefix(ref.rel, "/") || strings.Contains(ref.rel, "..") {
+			return fmt.Errorf("%s %q 必须是不含 .. 的包内相对路径", ref.label, ref.rel)
+		}
+		// 与 component entry 同理：Provider 契约决定内核 Catalog 的内容，
+		// 不被 digest 覆盖等于允许一份未经校验的契约进内核
+		if _, ok := m.Digests[ref.rel]; !ok {
+			return fmt.Errorf("%s %q 未被 digests 覆盖", ref.label, ref.rel)
+		}
+	}
+	if m.Provider.Descriptor == m.Provider.Schemas {
+		return fmt.Errorf("provider.descriptor 与 provider.schemas 不能是同一个文件")
 	}
 	return nil
 }

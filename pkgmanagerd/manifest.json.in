@@ -8,7 +8,8 @@
   "target_nervus_api": 1,
   "supported_abis": ["linux-arm64"],
   "permissions": [
-    "perm.service.register"
+    "perm.service.register",
+    "perm.pkg.admin"
   ],
   "components": [
     {
@@ -30,5 +31,9 @@
       }
     }
   ],
+  "provider": {
+    "descriptor": "provider.binpb",
+    "schemas": "schemas.binpb"
+  },
   "digests": {}
 }

@@ -220,6 +220,61 @@ func TestSignatureBlock_JSONShapeMatchesKernel(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AcceptsProviderArtifacts(t *testing.T) {
+	m := minimalManifest()
+	m.Components[0].Exports = []Export{{
+		Interface: "nervus.interface.example", Visibility: "public",
+	}}
+	m.Provider = &ProviderArtifactsRef{
+		Descriptor: "provider.binpb",
+		Schemas:    "schemas.binpb",
+	}
+	m.Digests = map[string]string{
+		"bin/svc":        "deadbeef",
+		"provider.binpb": "cafe",
+		"schemas.binpb":  "f00d",
+	}
+	if err := validateManifest(m); err != nil {
+		t.Fatalf("合法的 provider 段被拒: %v", err)
+	}
+}
+
+func TestManifest_ProviderJSONShapeMatchesKernel(t *testing.T) {
+	// 内核用 DisallowUnknownFields 解析 manifest.json。provider 段的字段名与
+	// omitempty 行为必须与 pkgregistry.ProviderArtifactsRef 完全一致。
+	m := minimalManifest()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "provider") {
+		t.Error("Provider 为 nil 时不应出现在 JSON 里（内核靠它区分「无 provider」）")
+	}
+
+	m.Provider = &ProviderArtifactsRef{Descriptor: "provider.binpb", Schemas: "schemas.binpb"}
+	b, err = json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal with provider: %v", err)
+	}
+	var generic struct {
+		Provider map[string]any `json:"provider"`
+	}
+	if err := json.Unmarshal(b, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for k := range generic.Provider {
+		switch k {
+		case "descriptor", "schemas":
+		default:
+			t.Errorf("provider 段多出内核不认识的字段 %q", k)
+		}
+	}
+	if generic.Provider["descriptor"] != "provider.binpb" ||
+		generic.Provider["schemas"] != "schemas.binpb" {
+		t.Errorf("provider 段内容错误: %+v", generic.Provider)
+	}
+}
+
 func TestValidateManifest_RejectsBadInput(t *testing.T) {
 	digests := map[string]string{"bin/svc": "deadbeef"}
 
@@ -240,6 +295,36 @@ func TestValidateManifest_RejectsBadInput(t *testing.T) {
 		{"component id 重复", func(m *Manifest) {
 			m.Components = append(m.Components, m.Components[0])
 		}, "重复"},
+		{"导出接口却没有 provider 段", func(m *Manifest) {
+			m.Components[0].Exports = []Export{{
+				Interface: "nervus.interface.example", Visibility: "public",
+			}}
+		}, "provider"},
+		{"provider.descriptor 为空", func(m *Manifest) {
+			m.Provider = &ProviderArtifactsRef{Descriptor: "", Schemas: "schemas.binpb"}
+		}, "provider.descriptor"},
+		{"provider.schemas 为空", func(m *Manifest) {
+			// descriptor 先过 digest 覆盖检查，才能验到 schemas 的空值判定
+			m.Digests = map[string]string{"bin/svc": "deadbeef", "provider.binpb": "cafe"}
+			m.Provider = &ProviderArtifactsRef{Descriptor: "provider.binpb", Schemas: ""}
+		}, "provider.schemas"},
+		{"provider 路径逃逸", func(m *Manifest) {
+			m.Provider = &ProviderArtifactsRef{
+				Descriptor: "../../etc/shadow", Schemas: "schemas.binpb",
+			}
+		}, "相对路径"},
+		{"provider 未被 digest 覆盖", func(m *Manifest) {
+			m.Provider = &ProviderArtifactsRef{
+				Descriptor: "provider.binpb", Schemas: "schemas.binpb",
+			}
+		}, "digests"},
+		{"descriptor 与 schemas 同一个文件", func(m *Manifest) {
+			// 单独给一份 digests：这条要越过覆盖检查才能验到同名判定
+			m.Digests = map[string]string{"bin/svc": "deadbeef", "provider.binpb": "cafe"}
+			m.Provider = &ProviderArtifactsRef{
+				Descriptor: "provider.binpb", Schemas: "provider.binpb",
+			}
+		}, "同一个文件"},
 	}
 
 	for _, tc := range tests {

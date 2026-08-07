@@ -1,7 +1,20 @@
 # nervus-system-server
 
-Nervus OS（NSOS）的**系统服务层**。这些服务随系统镜像发布，配合 `nervud` 内核
-提供软件安装等系统能力。
+System-Server for Nervus OS
+Nervus OS 的系统服务仓库
+
+1、作用
+ 1.能力提供者。
+ 2.需要一直在后台运行的系统服务
+
+2.系统服务是一个二进制文件。我们推荐使用go编写
+
+3.本仓库使用go编写系统服务，请打包后安装进系统
+
+4.关于如何写系统服务，请参考 [WRITING-A-SERVICE.md](WRITING-A-SERVICE.md)
+
+5.系统服务使用IPC与内核进行通信
+
 
 ```text
 App (Kotlin/Compose)  ──IPC──▶  系统服务 (本仓库, Go)  ──adminwire──▶  nervud

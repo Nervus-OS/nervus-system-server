@@ -68,6 +68,19 @@ for entry in "${SERVICES[@]}"; do
 	CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
 		go build -trimpath -ldflags "-s -w" -o "$dir/bin/$svc" "./$svc"
 
+	# Provider 契约：导出接口的服务【必须】带 provider.binpb + schemas.binpb，
+	# 否则内核 loadRequiredProviderArtifacts 以 ErrProviderArtifactsRequired 拒绝装载。
+	#
+	# 必须在 sysmanifest 之前跑：那一步才计算 digests，晚了这两个文件就不在清单里，
+	# 而内核会以「provider 未被 digest 覆盖」拒绝——错误信息离「构建顺序错了」很远。
+	#
+	# 用宿主 ABI 构建（不设 GOARCH）：providergen 是构建期工具，跑在构建机上，
+	# 产出的是与架构无关的 protobuf 字节。交叉编译它只会得到一个跑不起来的二进制。
+	if [[ -d "$REPO/$svc/providergen" ]]; then
+		echo "    provider 契约"
+		go run "./$svc/providergen" -out "$dir"
+	fi
+
 	# 以命令行的 ABI 为准——同一份模板要能构建多个 ABI。
 	#
 	# 【临时模板必须落在包目录之外】。放进 $dir 的话，sysmanifest 会把它算进

@@ -1,4 +1,12 @@
-# 写一个 Nervus 系统服务
+# How to write a Nervus system server
+
+1.教程使用go
+
+2.禁止修改nervus-ipc，请通过ipc的附加功能实现相关功能
+
+3.服务与服务之间可以通过ipc连接
+
+4.系统服务可以创建一个UDS用于与被调用的应用或者服务之间进行通信
 
 从零做出一个能被 `nervud` 拉起、能被应用调到的系统服务。
 
