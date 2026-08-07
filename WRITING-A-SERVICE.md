@@ -32,6 +32,11 @@
 一个服务可以同时是两者，但先想清楚主要身份是哪个——它决定了 manifest 怎么写，
 以及内核会用哪套准入规则查你。
 
+`camerad` 是同时兼两者的范例：它对外提供两个接口（采集 + 配置），同时又要
+去 `ResolveEndpoint` 调内核的 Transfer Control 建数据面管子。它还示范了三件
+只有它做过的事——**一个包导出多个接口**、**资源声明来自数据文件而非代码常量**、
+**推送事件**。
+
 ---
 
 ## 1. 建目录
@@ -279,11 +284,25 @@ slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
 SERVICES=(
 	"nervus.pkgmanagerd:pkgmanagerd"
 	"nervus.safety.recovery:safetyrecoveryd"
+	"nervus.camerad:camerad"
 	"nervus.myservice:myserviced"        # ← 新增
 )
 ```
 
 有 `providergen/` 目录的服务，脚本会自动在 `sysmanifest` 之前跑它。
+
+### 需要随包发布数据文件时
+
+服务要带配置文件（板级参数、标定数据）时，必须在 `providergen` **之前**拷进包
+目录——它要读，而且 `sysmanifest` 之后才算 `digests`。顺序错了的表现是内核以
+「文件未被 digest 覆盖」拒绝整个包，而那个错误看起来像镜像损坏。
+
+`camerad` 的板级 JSON 是范例（脚本里那段 `if [[ "$svc" == "camerad" ]]`）。
+
+**同一份文件由 `providergen` 与服务本体共读**是刻意的：camerad 的资源声明从它
+生成，运行期又用它做 role → 设备映射。拆成两份的话，「Catalog 里有 cam.front」
+和「运行时 cam.front 指向哪个设备」会变成两个可以各自漂移的事实——而漂移之后
+两边都不报错。
 
 ---
 
@@ -352,6 +371,34 @@ descriptorWire, schemaWire, err := ipcregistry.MarshalProviderArtifacts(
 
 控制面确实要传结构化数据时，才编 `.proto`，用 `BuildSchemaBundle` 从生成的
 method enum 构造 bundle（`pkgmanagerd/providergen/main.go` 是范例）。
+
+**要推事件就改用 `BuildSchemaBundleWithEvents`**，多传一个 event enum
+（`camerad/providergen/main.go` 是范例）：
+
+```go
+bundle, err := ipcregistry.BuildSchemaBundleWithEvents(
+    interfaceID, 1,
+    myv1.MyMethod(0).Descriptor(),
+    myv1.MyEvent(0).Descriptor())
+```
+
+> ⚠️ **带载荷的事件必须走 bundle，不能内联到 descriptor**
+>
+> `ProvidedInterfaceVersion.events` 那条路是给**元数据接口**用的，它不允许
+> `payload_type`——没有 FileDescriptorSet 就无从校验那个类型名指向的消息是否
+> 真的存在。而带 schema 的接口正相反，它的事件几乎总是有载荷。
+>
+> 两处都写会被 registry 当成「同一个接口既内联又带 bundle」直接拒绝。
+>
+> 事件枚举**必须与方法枚举同文件**，否则它的传递依赖不在 bundle 的
+> descriptor set 里。它不影响 `schema_hash`（本来就在同一份 descriptor set
+> 里），所以给一个已有接口补上事件枚举**不会让已装的 Provider 报到失败**。
+
+> ⚠️ **`delivery_class` 漏填会 fail closed 成 RELIABLE**
+>
+> 那是最严的一档（不允许任何丢弃）。一路遥测流按 RELIABLE 走，消费方稍慢
+> 就会被内核断开订阅。想要「只要最新值」写 `STATE`，想要「丢了就丢了」写
+> `LOSSY`——两者的语义相反，而漏填时你拿到的是第三种。
 
 **method ID 常量必须从生成代码取，不要在本地重抄一份**——抄一份的代价不是重复，
 是它会悄悄过期：

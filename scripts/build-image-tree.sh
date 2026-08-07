@@ -40,9 +40,16 @@ esac
 SERVICES=(
 	"nervus.pkgmanagerd:pkgmanagerd"
 	"nervus.safety.recovery:safetyrecoveryd"
+	"nervus.camerad:camerad"
 )
 
+# 板级摄像头配置。camerad 的资源声明由它生成，因此【换板必须重新打包】——
+# 板级配置进 digests、随镜像签名，运行期改一行 JSON 就能给自己加一路
+# 「前视摄像头」的路子在这里被堵死。
+BOARD="${NERVUS_BOARD:-reference}"
+
 echo "==> 目标 ABI: $ABI (GOARCH=$GOARCH)"
+echo "==> 板级配置: $BOARD"
 mkdir -p "$OUT"
 
 for entry in "${SERVICES[@]}"; do
@@ -68,6 +75,23 @@ for entry in "${SERVICES[@]}"; do
 	CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
 		go build -trimpath -ldflags "-s -w" -o "$dir/bin/$svc" "./$svc"
 
+	# 服务专属数据文件。必须在 providergen 之前落盘（它要读），也必须在
+	# sysmanifest 之前（那一步才算 digests）。
+	#
+	# 目前只有 camerad：它的资源声明来自板级 JSON，而【同一份文件】运行期还要
+	# 再读一次做 role → 设备映射。拆成两份的话，「Catalog 里有 cam.front」和
+	# 「运行时 cam.front 指向哪个设备」会各自漂移，而漂移之后两边都不报错。
+	providerArgs=()
+	if [[ "$svc" == "camerad" ]]; then
+		board="$REPO/camerad/boards/$BOARD.json"
+		if [[ ! -f "$board" ]]; then
+			echo "缺少板级配置: $board（可用 NERVUS_BOARD 指定）" >&2
+			exit 1
+		fi
+		cp "$board" "$dir/board.json"
+		providerArgs=(-profile "$dir/board.json")
+	fi
+
 	# Provider 契约：导出接口的服务【必须】带 provider.binpb + schemas.binpb，
 	# 否则内核 loadRequiredProviderArtifacts 以 ErrProviderArtifactsRequired 拒绝装载。
 	#
@@ -78,7 +102,7 @@ for entry in "${SERVICES[@]}"; do
 	# 产出的是与架构无关的 protobuf 字节。交叉编译它只会得到一个跑不起来的二进制。
 	if [[ -d "$REPO/$svc/providergen" ]]; then
 		echo "    provider 契约"
-		go run "./$svc/providergen" -out "$dir"
+		go run "./$svc/providergen" -out "$dir" "${providerArgs[@]}"
 	fi
 
 	# 以命令行的 ABI 为准——同一份模板要能构建多个 ABI。

@@ -48,6 +48,11 @@ nervus-system-server/
 │   ├── manifest.json.in    包清单模板
 │   └── README.md
 ├── safetyrecoveryd/        ← 服务（Client 范例）
+├── camerad/                ← 服务（多 endpoint + 数据面范例）
+│   ├── boardprofile/       板级 JSON 解析（构建期与运行期共用同一个解析器）
+│   ├── boards/             板级配置，按板一份
+│   ├── providergen/        ← 读板级 JSON 产出资源声明
+│   └── README.md
 └── scripts/                构建工具，不是服务
     ├── build-image-tree.sh
     ├── sync-ipc.sh
@@ -299,7 +304,7 @@ Catalog 层的冲突（资源多管理者、接口契约不一致、命名空间
 |---|---|---|
 | `nervus.pkgmanagerd` | 骨架已通 | 软件安装 |
 | `nervus.safety.recovery` | 可实现 | Safety re-arm 策略（内核 builtin 已开放 `REARM`） |
-| `nervus.camerad` | 计划 | 摄像头通用能力 + V4L2 兼容层 |
+| `nervus.camerad` | 骨架已通 | 摄像头通用能力 + V4L2 兼容层（见 [camerad/README.md](camerad/README.md)） |
 | `nervus.sessiond` | 计划 | 控制主体（HUMAN/AI）会话 |
 | `nervus.permissionui` | 计划 | 权限确认通道 |
 

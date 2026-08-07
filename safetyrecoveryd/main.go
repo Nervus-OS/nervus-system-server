@@ -60,8 +60,12 @@ const interfaceID = "nervus.interface.safety.control"
 
 // pollInterval 是安全态轮询周期。
 //
-// 【只能轮询，没有订阅】：Subscribe 组（envelope 40-45）nervud 尚未实现，
-// 发过去会被直接关连接。见 nervus-ipc 根 README 的「实现状态」表。
+// 【轮询而非订阅，理由已经变了】：订阅通道（envelope 40-45）现已接通，但
+// nervus.interface.safety.control 这个内建接口【没有声明任何 EventMeta】——
+// 订阅一个契约里不存在的 event_id 会被 RouteEvent 直接拒掉。
+//
+// 要改成订阅，得先在内核那侧给 safety 内建接口声明事件；那是 safety.proto
+// 五条消息拿到承载通道之后的事（见文件头）。
 //
 // 2 秒是权衡：安全态迁移是低频事件（正常运行时根本不变），轮询太密只是白烧
 // CPU 与审计条目；但停机之后运维盯着 UI 等状态更新，太慢会显得系统没反应。
@@ -133,9 +137,9 @@ func resolveSafety(ctx context.Context, c *sdk.Client) (sdk.Endpoint, error) {
 		MaxMajor:    1,
 		// 不填 selector：Safety 是整机状态，不绑任何单个 Resource。
 		//
-		// 【但要注意】nervud 对空 selector 取隐式默认 {motion.base, main}，
-		// 于是 Resolve 会连带解析出一个 base.main 句柄。那个句柄对本接口
-		// 没有意义，忽略即可——协议在 [v2+] 才会让 selector 真正可选。
+		// v2 起这就是字面意思。v1 时代空 selector 会被隐式当成
+		// {motion.base, base.main}，于是本次 Resolve 会莫名其妙连带解析出一个
+		// 底盘句柄；那条隐式默认已经随 major 2 一起移除。
 	})
 	if err != nil {
 		return sdk.Endpoint{}, fmt.Errorf("解析 %s: %w", interfaceID, err)

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "package_id": "nervus.camerad",
+  "label": "Nervus Camera Service",
+  "version": "0.1.0",
+  "version_code": 1,
+  "min_nervus_api": 2,
+  "target_nervus_api": 2,
+  "supported_abis": ["linux-arm64"],
+  "permissions": [
+    "perm.service.register"
+  ],
+  "components": [
+    {
+      "id": "main",
+      "type": "service",
+      "runtime": "native",
+      "entry": "bin/camerad",
+      "launch_mode": "always-on",
+      "criticality": "optional",
+      "exports": [
+        {
+          "interface": "nervus.interface.camera",
+          "visibility": "public"
+        },
+        {
+          "interface": "nervus.interface.camera.config",
+          "visibility": "public"
+        }
+      ],
+      "limits": {
+        "memory_max_mb": 256,
+        "tasks_max": 64
+      }
+    }
+  ],
+  "provider": {
+    "descriptor": "provider.binpb",
+    "schemas": "schemas.binpb"
+  },
+  "digests": {}
+}

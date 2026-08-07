@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "board": "nervus-reference",
+
+  "cameras": [
+    {
+      "role": "cam.front",
+      "match": {"usb_path": "1-1.1"},
+      "labels": {
+        "nervus.camera.facing": "front",
+        "nervus.camera.kind": "color",
+        "nervus.camera.mount": "head"
+      }
+    },
+    {
+      "role": "cam.rear",
+      "match": {"usb_path": "1-1.2"},
+      "labels": {
+        "nervus.camera.facing": "rear",
+        "nervus.camera.kind": "color",
+        "nervus.camera.mount": "body"
+      }
+    }
+  ],
+
+  "usb_pool": {
+    "role_prefix": "cam.usb",
+    "max_slots": 2
+  }
+}
