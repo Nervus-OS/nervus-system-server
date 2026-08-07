@@ -1,14 +1,15 @@
-# How to write a Nervus system server
-
-1.教程使用go
-
-2.禁止修改nervus-ipc，请通过ipc的附加功能实现相关功能
-
-3.服务与服务之间可以通过ipc连接
-
-4.系统服务可以创建一个UDS用于与被调用的应用或者服务之间进行通信
+# 写一个 Nervus 系统服务
 
 从零做出一个能被 `nervud` 拉起、能被应用调到的系统服务。
+
+## 四条规矩
+
+1. **教程使用 Go。**
+2. **不要改 `nervus-ipc`。** 加一个能力不需要动协议——用 ProviderArtifacts 随包
+   声明即可（第 5 节）。IPC 只是线；扩展要改线，说明方向错了。
+3. **服务与服务之间可以通过 IPC 互相连接**（Resolve + Request，与应用调服务同路）。
+4. **与内核一律 proto IPC；与对端的数据用自己的协议。** 内核负责证明你是谁、
+   允不允许、能开多大的管子；管子里流什么它不看（第 7 节）。
 
 本文的每一条「注意」都对应一次真实踩过的坑，不是预防性提醒。文末的
 [常见失败](#常见失败) 是按退出码和错误信息查的对照表。
@@ -25,13 +26,11 @@
 | 关键调用 | `RegisterEndpoint` | `ResolveEndpoint` |
 | SDK 类型 | `sdk.NewServiceHost` | `sdk.Connect` |
 | manifest 字段 | `components[].exports` | `components[].interfaces` |
+| **是否需要 Provider 契约** | **必须有** | 不需要 |
 | 本仓库范例 | `pkgmanagerd` | `safetyrecoveryd` |
 
-一个服务可以同时是两者（既提供接口又调别人的），但先想清楚主要身份是哪个——
-它决定了 manifest 怎么写，以及内核会用哪套准入规则查你。
-
-> **提示**：如果你只是想调内核已有的接口（比如 safety），你是 Client，
-> 不需要碰内核代码。如果你要提供一个**新接口**，见 [第 5 节](#5-新接口要改内核)。
+一个服务可以同时是两者，但先想清楚主要身份是哪个——它决定了 manifest 怎么写，
+以及内核会用哪套准入规则查你。
 
 ---
 
@@ -54,6 +53,8 @@ mkdir myserviced
 myserviced/
 ├── main.go            进程入口：连接、报到、Serve
 ├── service.go         业务实现
+├── providergen/       Provider 契约生成器（Provider 才需要，见第 5 节）
+│   └── main.go
 ├── manifest.json.in   包清单模板
 └── README.md          说明 + 部署路径
 ```
@@ -65,6 +66,8 @@ myserviced/
 
 这不是约定，是语言层挡着。需要共享代码时，放进 `nervus-ipc`（协议与 SDK 的家），
 **不要**在本仓库开共享包。
+
+> `providergen/` 是子目录里的另一个 `package main`，同样 import 不进来。
 
 ---
 
@@ -100,6 +103,10 @@ myserviced/
       "limits": { "memory_max_mb": 128, "tasks_max": 64 }
     }
   ],
+  "provider": {
+    "descriptor": "provider.binpb",
+    "schemas": "schemas.binpb"
+  },
   "digests": {}
 }
 ```
@@ -111,24 +118,30 @@ myserviced/
 | `package_id` | 反写域名。系统服务用 `nervus.` 前缀。**它决定 UID 分配与数据目录名**，改了等于换了一个包 |
 | `version_code` | 单调递增整数，升级连续性靠它，不是靠 `version` 字符串 |
 | `supported_abis` | 只认 `linux-arm64` / `linux-armv7` / `linux-x86_64` 三个 canonical token。不接受 `arm64-v8a`、`aarch64`，也**不做归一化** |
-| `permissions` | **申请了才可能拿到。** 见下方警告 |
+| `permissions` | **申请了才可能拿到**，见下方警告 |
 | `components[].id` | 必须与代码里的 `componentID` 常量一致 |
 | `components[].entry` | 相对包根的路径。native 必须是包内 ELF |
 | `launch_mode` | `always-on` 随内核启动拉起；`on-demand` 被解析时拉起；`manual` 只能显式启动。`type: "app"` 不能 `always-on` |
 | `criticality` | `optional` 崩了只重启；`vital` 崩溃会升级到 Safety。**先用 `optional`** |
 | `exports` | Provider 用。`visibility: "public"` 任何包可解析，`"private"` 只有同签名的包可以 |
 | `interfaces` | Client 用。声明你要**消费**哪些接口 |
+| `provider` | **有 `exports` 就必须有**，见第 5 节 |
 | `digests` | 留空 `{}`，由 `sysmanifest` 在构建期填 |
 
-> ⚠️ **`permissions` 必须显式声明,即使 v1 全授予**
+> ⚠️ **`permissions` 必须显式声明**
 >
-> 内核当前的 `permission.V1GrantAll = true` 让「申请即授予」、跳过运行期确认，
-> 但**仍然要求 manifest 里声明过**。没声明的权限拿不到，症状是
+> manifest 里的是**申请**，实际授予由内核按「来源 + 信任 + 签名角色 + GrantMode」
+> 求交（`permission.Registry.IntersectAt`）。没申请的一定拿不到，症状是
 > `missing permission perm.xxx`。
 >
-> Provider 需要 `perm.service.register`（或 `perm.service.register.private`）。
-> Client 需要目标接口对应的权限——查
-> `nervud/internal/endpoint/catalog.go`。
+> 申请了也不一定拿到：`perm.service.register` 要求 OEM 信任 + 系统镜像来源；
+> `perm.pkg.admin` 还要 `platform-release` 签名角色。**开发构建下这些会全部被拒**，
+> 除非开 `-dev-trust-system-packages`（见第 8 节）。
+
+> ⚠️ **`exports` 与 `provider` 必须同时出现**
+>
+> 内核对「有 `exports` 却没有 `provider`」直接返回 `ErrProviderArtifactsRequired`。
+> 没有任何例外通道——曾经有一条只给 `nervus.pkgmanagerd` 的兼容桥，已整段移除。
 
 ---
 
@@ -167,6 +180,7 @@ registerHandlers(host, svc, log)
 epID, err := host.RegisterEndpoint(ctx, sdk.RegisterRequest{
     InterfaceID: interfaceID,
     Major:       1,
+    SchemaHash:  contractHash,  // 必须与 provider.binpb 里声明的一致
 })
 ```
 
@@ -174,20 +188,21 @@ epID, err := host.RegisterEndpoint(ctx, sdk.RegisterRequest{
 >
 > 报到成功那一刻 nervud 就可能转发 Dispatch。此时还没注册的 method 会被回
 > `NOT_FOUND`——调用方会以为**这个方法不存在**，而不是「服务还没准备好」。
-> 这种错误很难往回追。
+
+> ⚠️ **`SchemaHash` 现在是必填且被逐字节比对**
+>
+> 它必须等于你的 `providergen` 写进 descriptor 的那个值。曾经有一条允许
+> `nervus.pkgmanagerd` 交空 hash 的兼容桥，已经移除——**所有 Provider 一视同仁**。
+> 对不上是 `FAILED_PRECONDITION`。
 
 > ⚠️ **连不上控制面就直接退出，不要写重试循环**
 >
 > systemd 会按退避重启，nervud 的监督链会在反复崩溃时按 `criticality` 处置。
 > 自己重试会掩盖「nervud 没起来」这个事实，让本进程看起来健康。
 
-`RegisterRequest` 的两个留空字段：
-
-- **`ResourceHandle`** 留空 = 未指定。内核只在非空时校验它必须是 Resource
-  Registry 里的已知句柄。不绑物理资源的接口**填了反而会被
-  `INVALID_ARGUMENT` 拒掉**
-- **`SchemaHash`** 留空。内核 v1 **只记录不比对**（尚无权威 schema Registry）。
-  比对开启后必须填真实 hash
+`RegisterRequest.ResourceHandle` 留空 = 未指定。内核只在非空时校验它必须是
+Resource Registry 里的已知句柄。不绑物理资源的接口**填了反而会被
+`INVALID_ARGUMENT` 拒掉**。
 
 ### Client 骨架
 
@@ -210,6 +225,32 @@ ep, err := c.ResolveEndpoint(ctx, sdk.ResolveRequest{
 > 日志里堆一串 `NOT_FOUND`——看起来像故障，其实只是竞态。
 >
 > 退避重试 10~20 次、每次 500ms 是合适的量级。
+
+### 按语义选设备，不要按名字
+
+绑物理资源的接口，用 `ResourceSelector` 的标签而不是硬编码 role：
+
+```go
+ep, err := c.ResolveEndpoint(ctx, sdk.ResolveRequest{
+    InterfaceID: "nervus.interface.camera", MinMajor: 1, MaxMajor: 1,
+    Selector: &ipcv1.ResourceSelector{
+        Type:   "nervus.resource.camera",
+        Labels: map[string]string{"nervus.camera.facing": "front"},
+        // 不写 Policy = REQUIRE_UNIQUE：命中多个时报错而不是随便给一个
+    },
+})
+```
+
+`stable_role` 是**板级配置的产物**（这块板上前视摄像头叫 `cam.front` 还是
+`camera0`），依赖它换块板就得改代码。
+
+> ⚠️ **多候选默认 fail closed**
+>
+> 不指定 `Policy` 等于 `REQUIRE_UNIQUE`：命中多个直接失败。要系统替你挑，必须
+> 显式写 `SYSTEM_PREFERRED`。
+>
+> 这是有意的——「我要一个摄像头，系统随便给了一个」在候选里混着前视和后视
+> （或左臂和右臂）时，比一个明确的错误危险得多。
 
 ### 优雅退出
 
@@ -242,68 +283,104 @@ SERVICES=(
 )
 ```
 
+有 `providergen/` 目录的服务，脚本会自动在 `sysmanifest` 之前跑它。
+
 ---
 
-## 5. 新接口要改内核
+## 5. 新接口：写 Provider 契约，不改内核
 
 **如果你只是消费已有接口，跳过本节。**
 
-提供一个**新接口**时，光在自己的 manifest 里 `exports` 是不够的——调用方能不能
-解析到你，由内核的两张编译期表决定。这两张表在 `nervud` 仓库：
+> **这一节以前教人去改 `nervud/internal/endpoint/catalog.go` 和
+> `permission/catalog.go`。那两个文件已经不存在了**，取而代之的是数据驱动的
+> `internal/catalog`——接口、权限、资源全部随包分发，加能力不改内核。
 
-### 5.1 接口 → 权限门槛
+### 5.1 最省事的形态：元数据接口，零 protobuf 消息
 
-`nervud/internal/endpoint/catalog.go`：
-
-```go
-{InterfaceID: "nervus.interface.my.thing", RequiredPermission: "perm.my.thing"},
-```
-
-> ⚠️ **漏登记不是 fail-closed，是 fail-open**
->
-> `resolve.go` 在目录未命中时把 `requiredPermission` 取**空串**，也就是
-> **不设门槛**——任意应用都能解析到你的服务。
->
-> 这个方向是有意的（私有接口不该被要求登记进内核编译期表），但代价是
-> 漏登记一个标准接口**不会有任何症状**，直到有人发现门是开的。
->
-> `nervus.interface.pkg.manager` 就漏过一次：任意 Ordinary 应用都能让
-> pkgmanagerd 装包，而装包能往系统里放任意可执行文件。
-
-### 5.2 权限定义
-
-`nervud/internal/permission/catalog.go`：
+能力接口的载荷常常本来就不是 protobuf（摄像头帧、麦克风采样、雷达点云都走
+Transfer 的不透明字节）。这类接口**不需要任何 `.proto` 消息**：
 
 ```go
-{
-    ID:          "perm.my.thing",
-    MinTrust:    identity.TrustOrdinary,   // Ordinary / OEM / Platform
-    Mode:        GrantInstall,             // GrantInstall / GrantUser / GrantSignature
-    Description: "...",
-},
+// myserviced/providergen/main.go
+methods := []*ipcv1.MethodMeta{
+    {
+        MethodId:           1,   // OpenStream
+        RequiredPermission: "perm.my.thing",
+        RiskClass:          ipcv1.RiskClass_RISK_CLASS_NORMAL,
+        IsReadOnly:         true,
+        // request_type / response_type 留空：没有控制面消息
+        Transfer: &ipcv1.TransferPolicy{
+            Direction:         ipcv1.TransferDirection_TRANSFER_DIRECTION_PROVIDER_TO_CALLER,
+            MaxStreams:        1,
+            MaxPacketBytes:    4 << 20,
+            MaxBytesPerSecond: 64 << 20,
+        },
+    },
+    {MethodId: 2, RequiredPermission: "perm.my.thing"},  // CloseStream
+}
+
+hash, _ := ipcregistry.MethodsHash(methods)
+descriptor := &ipcv1.ProviderDescriptor{
+    PackageId: "nervus.myservice",
+    Interfaces: []*ipcv1.ProvidedInterface{{
+        InterfaceId: interfaceID,
+        InterfaceVersions: []*ipcv1.ProvidedInterfaceVersion{{
+            Major: 1, SchemaHash: hash, Methods: methods,
+        }},
+        RequiredPermission: "perm.my.thing",
+    }},
+}
+// 空的 bundle set —— 没有任何 schema
+descriptorWire, schemaWire, err := ipcregistry.MarshalProviderArtifacts(
+    descriptor, &ipcv1.InterfaceSchemaBundleSet{})
 ```
 
-| `Mode` | 何时用 |
+内核真正需要知道的只有三件事：**谁在调、允不允许、能开多大的管子**。这三件都在
+`MethodMeta` 里，与消息形状无关。
+
+> ⚠️ **元数据接口不得声明 `request_type` / `response_type` / `error_detail_type`**
+>
+> 没有 schema bundle 可供解析它们。打包期就会被拒。
+
+> ⚠️ **`Transfer` 预算的三项都不能为 0**
+>
+> `MaxStreams` / `MaxPacketBytes` / `MaxBytesPerSecond` 任一为 0，nervud 会以
+> `method transfer policy is unbounded` 拒绝——而那时错误出现在第一次开流，
+> 离「manifest 里少写了一项」很远。打包期已经会拦下。
+
+### 5.2 需要结构化消息时：带 schema bundle
+
+控制面确实要传结构化数据时，才编 `.proto`，用 `BuildSchemaBundle` 从生成的
+method enum 构造 bundle（`pkgmanagerd/providergen/main.go` 是范例）。
+
+**method ID 常量必须从生成代码取，不要在本地重抄一份**——抄一份的代价不是重复，
+是它会悄悄过期：
+
+```go
+methodInstall = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_INSTALL)  // 对
+const methodInstall = 1                                                            // 错
+```
+
+### 5.3 权限与命名空间
+
+| 你想定义 | 规则 |
 |---|---|
-| `GrantInstall` | 安装时授予，不打扰用户 |
-| `GrantUser` | 危险操作，用户必须当场知情（装包、运动控制） |
-| `GrantSignature` | 只给特定 trust 的包 |
+| `perm.*` 平台权限 | 只有 `platform-release` 签名的包能定义 |
+| 私有权限 | 必须在 `<package_id>.*` 之下 |
+| `nervus.interface.*` 标准接口 | 只有 `platform-release` 能**定义**；`oem-service` 可以**实现** |
+| 私有接口 | 必须在 `<package_id>.*` 之下 |
+| `nervus.resource.*` 标准资源类型 | 只有 `platform-release` 能定义；OEM 只能绑定已存在的 |
+| 资源标签键 | 同上：平台标签 `nervus.*` 只有 platform-release 能定义，私有标签在自己命名空间下 |
 
-再危险的，加 `RequireSignerRole: "platform-release"`——只给平台发布密钥签的包
-（`perm.safety.rearm`、`perm.authority.reboot` 是这一档）。
+> ⚠️ **多个 Provider 实现同一标准接口时，契约必须逐字节一致**
+>
+> `sameInterfaceContract` 会比对 method_id、required_permission、risk_class、
+> Transfer 预算。任何一项不同，第二个 Provider 会以
+> `interface ... conflicts with definition owned by ...` 被拒。
+>
+> 这正是「厂商可互换」成立的原因：App 解析到哪一家，拿到的语义都一样。
 
-### 5.3 proto 定义
-
-接口的消息与 method ID 定义在 `nervus-ipc`。**method ID 常量必须从生成代码取，
-不要在本地重抄一份**——抄一份的代价不是重复，是它会悄悄过期：
-
-```go
-// 对的
-methodInstall = uint32(pkgv1.PackageManagerMethod_PACKAGE_MANAGER_METHOD_INSTALL)
-
-// 错的
-const methodInstall = 1
-```
+### 5.4 三仓库必须指向同一个 ipc commit
 
 `nervud`、`nervus-system-server`、`nervus-ipc` 三者**必须指向同一个 commit**，
 否则两侧对同一份 Envelope 的理解会悄悄分叉——而两边都能编译、都能跑。
@@ -311,28 +388,80 @@ const methodInstall = 1
 
 ---
 
-## 6. 构建、签名、部署
+## 6. 服务间共享文件区
 
-### 发布形态是二进制，不是源码
+申请 `perm.storage.shared` 才会拿到两个目录（**按需创建，不申请就没有**）：
+
+```text
+/run/nervus/shared/<package_id>/      tmpfs，重启即失。运行期交换
+/var/lib/nervus/shared/<package_id>/  磁盘，持久。配置/模型/缓存
+```
+
+属主 = 你的 UID，模式 0755：**自己的目录可写，别人的目录可读**。目录由内核建——
+根是 nervud 独占可写的，所以没有包能抢先占用别人的目录名。
+
+### 想用自己的协议跟另一个服务通信？把 UDS 建在这里
+
+```go
+sock := filepath.Join("/run/nervus/shared", myPackageID, "control.sock")
+ln, err := net.Listen("unix", sock)
+```
+
+目录 0755，别的服务读得到路径也连得上。**这是「服务之间用自己的协议」最直接的
+落地方式**——内核不参与，也不解析你说什么。
+
+UDS 适合控制与小消息；大流量走第 7 节的 Transfer。
+
+> ⚠️ **敏感数据不能放这里**
+>
+> 共享区是**全系统可读的**（跨包读隔离只靠数据目录的 0700 实现，共享区是 0755）。
+> 只放「拿到 `perm.storage.shared` 就有资格看」的东西。
+>
+> 需要真实权限门槛的数据走 Transfer 的内存句柄——句柄本身就是凭证，没有文件
+> 系统路径可绕。把摄像头帧写进共享区等于让任何应用绕过 `perm.camera.capture`。
+
+> ⚠️ **不要用磁盘文件传视频流**
+>
+> 1080p30 裸流约 93 MiB/s，持续写 eMMC 是在烧闪存寿命。运行期大流量要么走
+> Transfer，要么落在 tmpfs 那个根。
+
+---
+
+## 7. 高吞吐数据：Transfer
+
+控制面 Envelope 不承载大数据。流程：
+
+1. 方法在 `MethodMeta.transfer` 声明预算（第 5.1 节）
+2. Provider handler 从 `CallContext.RouteID` 取当前 route，在**同一条**
+   `ServiceHost` 连接上调 `nervus.interface.transfer.control@1`
+3. nervud 按权威元数据、调用者权限、连接预算和 route 生命周期收紧方向、模式、
+   包大小与速率，返回 Provider/Caller 两张短期一次性 `TransferHandle`
+4. 两端 `sdk.AttachTransfer` 附着到内核独占的 Transfer socket
+
+**附着之后，管子里流什么由两端自己决定**——内核只做分帧与限速，不解析内容。
+这就是「与对端的数据用自己的协议」的落点。
+
+---
+
+## 8. 构建、签名、部署
 
 ```sh
 scripts/build-image-tree.sh ./out signing/platform-release.pem linux-arm64
 ```
 
-这一步做四件事：交叉编译（`CGO_ENABLED=0` 静态链接）→ 算 digest → 填 manifest
-→ Ed25519 签名。
+这一步做五件事：交叉编译（`CGO_ENABLED=0` 静态链接）→ **产出 Provider 契约** →
+算 digest → 填 manifest → Ed25519 签名。
 
 产物：
 
 ```text
 out/nervus.myservice/
 ├── bin/myserviced      静态二进制
+├── provider.binpb      Provider 契约
+├── schemas.binpb       schema（元数据接口时为空集）
 ├── manifest.json       digests 已填好
 └── manifest.sig        platform-release 角色签名
 ```
-
-目标机上**不需要** Go 工具链、源码、网络。这也是为什么 digest 与签名必须在
-构建期算好——目标机没有任何东西可以拿来重新计算。
 
 ### 部署路径
 
@@ -340,11 +469,9 @@ out/nervus.myservice/
 cp -r ./out/* <镜像挂载点>/usr/lib/nervus/system-packages/
 ```
 
-**目录名必须等于 `package_id`。** 内核按 manifest 内容认包，目录名只是容器，
-但两者不一致会让人排查时看着目录名找错包。
-
-内核启动扫描 glob 的是 `/usr/lib/nervus/system-packages/*/manifest.json`，
-**没有版本子目录**——系统包跟随整镜像 OTA，不存在多版本并存。
+**目录名必须等于 `package_id`。** 内核启动扫描 glob 的是
+`/usr/lib/nervus/system-packages/*/manifest.json`，**没有版本子目录**——系统包跟随
+整镜像 OTA，不存在多版本并存。
 
 > ⚠️ **系统镜像包与动态安装包是两条路，不能混**
 >
@@ -355,21 +482,30 @@ cp -r ./out/* <镜像挂载点>/usr/lib/nervus/system-packages/
 > | 签名角色 | `platform-release` | `developer`（自锚定） |
 > | 设备访问 | 可以碰 `/dev` | 拿不到 |
 
-### 签名角色选错的后果
+### 开发构建必须开 `-dev-trust-system-packages`
 
-`platform` / `oem` 角色要在 trust bundle 里查得到 key_id 才算数。**开发构建
-没有内嵌 platform 根**，于是一律 fail-closed：
+开发二进制没有内嵌平台根，`LoadTrustStore` 失败，于是每个系统包 fail-closed 到
+`Ordinary`——而 `perm.service.register` 要 OEM。**不开这个开关，你的服务注册不了。**
 
+```sh
+systemd-run --unit=nervud --collect \
+  --property=StandardOutput=append:/tmp/nervud.log \
+  --property=StandardError=append:/tmp/nervud.log \
+  ./nervud -dev-skip-preflight -dev-allow-sched-degrade \
+           -dev-trust-system-packages -log-level debug
 ```
-signer key not trusted for its role: "sha256:..."
-```
 
-`developer` 角色是**自锚定**的——公钥内嵌在签名块里，验签方不查信任库。
-第三方应用走这条路。
+它只放松「这把密钥是否由平台根授权」一件事。验签、key_id、digest 全部照做——
+改了二进制、改了 manifest、想冒充某个 key_id，三种都照样拒。
+
+> ⚠️ **必须以 systemd unit 运行，不能裸跑二进制**
+>
+> 组件的瞬态 unit 带 `BindsTo=nervud.service`。裸跑时那个 unit 不存在，
+> `StartTransientUnit` 会以 `Unit nervud.service not found` 失败。
 
 ---
 
-## 7. 内核为你做了什么
+## 9. 内核为你做了什么
 
 服务启动前，内核在**启动扫描**里自动补齐运行前置（`pkgregistry`）：
 
@@ -377,8 +513,9 @@ signer key not trusted for its role: "sha256:..."
 |---|---|---|
 | 分配稳定 UID | 20000–59999，**永不回收** | — |
 | `EnsureAppUser` | `/etc/passwd` 里的 `nervus-app-<uid>` | `217/USER` |
-| `CreatePrivateDataDirectory` | `/var/lib/nervus/package-data/<pkg>`，0700 | `226/NAMESPACE` |
-| `arbitrateSystemGrants` | `GrantedPermissions` | `missing permission` |
+| 私有数据目录 | `/var/lib/nervus/package-data/<pkg>`，0700 | `226/NAMESPACE` |
+| 共享区子目录 | `/run/nervus/shared/<pkg>` 与磁盘那个，0755 | 写入 `ENOENT` |
+| 权限裁决 | `GrantedPermissions` | `missing permission` |
 
 然后经 `authority` → systemd 拉起一个瞬态 unit：
 
@@ -389,38 +526,26 @@ nervus-<package_id>-<component_id>.service
 沙箱固定包含：`NoNewPrivileges`、`ProtectSystem=strict`、
 `SystemCallFilter=@system-service`、`BindsTo=nervud.service`（nervud 死了你也停）。
 
-**可写的只有自己的数据目录。** 别的位置即便属主与权限都对，写进去也是
-`read-only file system`——**权限与挂载是两道独立的门**。
+**可写的只有自己的数据目录（加共享区自己那个子目录）。** 别的位置即便属主与权限
+都对，写进去也是 `read-only file system`——**权限与挂载是两道独立的门**。
+
+### 一个坏包不会拖垮启动
+
+Catalog 层的冲突以前会让整个内核启动失败。现在启动扫描会**按包隔离肇事者**、
+大声审计、继续启动。你的服务被隔离时，journal 里会有
+`pkgregistry: package quarantined at boot`。
 
 ---
 
-## 8. 调试
-
-### 起 nervud（开发机）
+## 10. 调试
 
 ```sh
-systemd-run --unit=nervud --collect \
-  --property=StandardOutput=append:/tmp/nervud.log \
-  --property=StandardError=append:/tmp/nervud.log \
-  ./nervud -dev-skip-preflight -dev-allow-sched-degrade -log-level debug
-```
-
-> ⚠️ **必须以 systemd unit 运行,不能裸跑二进制**
->
-> 组件的瞬态 unit 带 `BindsTo=nervud.service`。裸跑时那个 unit 不存在，
-> `StartTransientUnit` 会以 `Unit nervud.service not found` 失败。
-
-### 看你的服务
-
-```sh
+# 看你的服务
 journalctl -u nervus-nervus.myservice-main.service -n 50
 systemctl show nervus-nervus.myservice-main.service --property=ActiveState,SubState
-```
 
-### 看内核怎么看你
-
-```sh
-grep -E "handshake complete|RegisterEndpoint|ResolveEndpoint|provision" /tmp/nervud.log
+# 看内核怎么看你
+grep -E "handshake complete|RegisterEndpoint|ResolveEndpoint|provision|quarantined" /tmp/nervud.log
 nervusctl list
 ```
 
@@ -437,7 +562,17 @@ nervusctl list
 | `217/USER` | UID 没进 `/etc/passwd`，NSS 解析不了 | 内核 `provision.go` 应自动建。没建说明启动扫描没跑到 |
 | `226/NAMESPACE` | 私有数据目录不存在，`WorkingDirectory` 指向它 | 同上 |
 | `203/EXEC` | 找不到可执行文件 | 检查 `entry` 路径；确认代码根对不对（系统包在 `/usr/lib/nervus/system-packages/`，**没有版本子目录**） |
-| `Unit ... was already loaded` | 上一次的瞬态 unit 没回收 | 内核已加 `CollectMode=inactive-or-failed` + `ResetFailedUnit`。手动清：`systemctl reset-failed <unit>` |
+| `Unit ... was already loaded` | 上一次的瞬态 unit 没回收 | 手动清：`systemctl reset-failed <unit>` |
+
+### 装载与契约
+
+| 症状 | 原因 |
+|---|---|
+| `ErrProviderArtifactsRequired` | manifest 有 `exports` 却没有 `provider` 段。**没有例外通道** |
+| `provider.descriptor 未被 digests 覆盖` | `providergen` 没在 `sysmanifest` 之前跑 |
+| `interface ... conflicts with definition owned by ...` | 与已有 Provider 的契约不一致（method_id / 权限 / 风险 / Transfer 预算任一项） |
+| `package quarantined at boot` | 你的包被 Catalog 层拒了，整机照常启动。看同一行的 `err` |
+| `declares inline methods and a schema bundle` | 同一个接口版本既内联 `methods` 又带 bundle，两份契约 |
 
 ### 握手与注册
 
@@ -445,7 +580,8 @@ nervusctl list
 |---|---|
 | `UNAUTHENTICATED` | `componentID` 与 manifest 的 `components[].id` 对不上。**不是权限问题** |
 | `interface not declared in manifest exports` | `interfaceID` 与 manifest 的 `exports[].interface` 对不上 |
-| `missing permission perm.service.register` | manifest 的 `permissions` 里没申请 |
+| `missing permission perm.service.register` | manifest 里没申请，**或**开发构建下没开 `-dev-trust-system-packages` |
+| `interface schema hash does not match the catalog` | `RegisterEndpoint` 的 `SchemaHash` 与 descriptor 里的不一致。空 hash 的兼容桥已移除 |
 | `RegisterEndpoint` 返回 `INVALID_ARGUMENT` | `ResourceHandle` 填了但不在 Resource Registry 里。不绑资源就**留空** |
 
 ### 解析与调用
@@ -453,24 +589,26 @@ nervusctl list
 | 症状 | 原因 |
 |---|---|
 | Resolve `NOT_FOUND` | 目标服务还没 `RegisterEndpoint`（竞态）→ **重试**；或它根本没起来 → 看它的 journal |
-| Resolve `PERMISSION_DENIED` | 缺接口对应的权限。查 `nervud/internal/endpoint/catalog.go` |
-| Resolve `FAILED_PRECONDITION` | 版本协商失败（`MinMajor`/`MaxMajor` 不含服务注册的 major），或 resource 找不到 |
+| Resolve `PERMISSION_DENIED` | 缺接口对应的权限 |
+| Resolve `FAILED_PRECONDITION` | 版本协商失败；或 selector 命中 0 个；或**命中多个而策略是 `REQUIRE_UNIQUE`**（默认） |
 | 调用返回 `NOT_FOUND` 但方法明明有 | handler 注册晚于 `RegisterEndpoint` |
+| `method transfer policy is unbounded` | `MethodMeta.transfer` 的三项预算有 0 |
 
 ### 文件系统
 
 | 症状 | 原因 |
 |---|---|
-| `permission denied` 写自己数据目录之外 | 沙箱只给数据目录可写。**这是设计** |
+| `permission denied` 写自己数据目录之外 | 沙箱只给数据目录 + 共享区自己那个子目录可写。**这是设计** |
 | `read-only file system` 而属主权限都对 | `ProtectSystem=strict`。属主是一道门，挂载是另一道，**两道都要过** |
+| 写共享区 `ENOENT` | 没申请 `perm.storage.shared`，子目录没被建出来 |
 
 ### 签名与安装
 
 | 症状 | 原因 |
 |---|---|
-| `signer key not trusted for its role` | 用 `platform` 角色签了，但没有内嵌 platform 根（开发构建）。第三方包用 `developer` 角色 |
-| `system package signature not verified; downgrading to Ordinary` | 开发构建的**正常现象**。系统包验不过降级为 Ordinary 但仍装载 |
-| `digest mismatch` | 二进制改了但没重跑 `sysmanifest`。**改了二进制必须重签** |
+| `signer key not trusted for its role` | 用 `platform` 角色签了但没有内嵌 platform 根 → 开发构建请开 `-dev-trust-system-packages` |
+| `system package signature not verified; downgrading to Ordinary` | 同上。降级后 `perm.service.register` 会被拒 |
+| `digest mismatch` | 二进制或 provider 契约改了但没重跑 `sysmanifest`。**改了就必须重签** |
 
 ---
 
@@ -481,12 +619,15 @@ nervusctl list
 - [ ] 目录名不与已有服务冲突
 - [ ] `componentID` 常量 == manifest `components[].id`
 - [ ] `interfaceID` 常量 == manifest `exports[].interface` / `interfaces[]`
-- [ ] `permissions` 里申请了需要的权限（**v1 全授予也要声明**）
+- [ ] Provider：有 `providergen/`，manifest 有 `provider` 段
+- [ ] Provider：`RegisterEndpoint` 的 `SchemaHash` == descriptor 里声明的
+- [ ] `MethodMeta.transfer` 的三项预算都非 0（声明了 transfer 的方法）
+- [ ] `permissions` 里申请了需要的权限
 - [ ] handler 在 `RegisterEndpoint` **之前**全部注册完
 - [ ] Client 的 Resolve 有重试
+- [ ] 绑资源的接口用 labels 选设备，不硬编码 role
 - [ ] 退出时 `UnregisterEndpoint`
 - [ ] 加进 `scripts/build-image-tree.sh` 的 `SERVICES`
-- [ ] 新接口：改了 nervud 的 `endpoint/catalog.go` 与 `permission/catalog.go`
 - [ ] 三个仓库指向同一个 nervus-ipc commit
 - [ ] README 里写了部署路径
 - [ ] `go vet ./... && go test ./... && go test ./... -race`
@@ -498,7 +639,9 @@ nervusctl list
 | 想知道 | 看 |
 |---|---|
 | 协议字段与 Envelope 结构 | `nervus-ipc/README.md`、`proto/nervus/ipc/v1/envelope.proto` |
-| 内核已知缺口 | `nervud/README.md` 的「已知缺口」 |
-| endpoint 注册的 7 步准入 | `nervud/internal/endpoint/register.go` |
+| 哪些 body 内核真的支持 | `nervus-ipc/README.md` 的「实现状态」表 |
+| 内核已知缺口 | `nervud/agent.md` 的「已知缺口」 |
+| 接口/权限/资源怎么进 Catalog | `nervud/internal/catalog/builder.go` |
+| endpoint 注册的准入链 | `nervud/internal/endpoint/register.go` |
 | 沙箱属性全集 | `nervud/internal/authority/systemd/props.go` |
 | 包的安装事务 | `nervud/internal/pkgregistry/install.go` |
