@@ -232,6 +232,20 @@ func (c *cameraEndpoint) openStream(cc sdk.CallContext, payload []byte) ([]byte,
 	c.streams[streamID] = st
 	c.mu.Unlock()
 
+	// 【登记事件归属】：这两个事件声明了 scoped，不登记的话订阅方一律订不上。
+	//
+	// 用 cc.RouteID 而不是自报调用方身份——它证明「这条流属于正在调我的这一位」，
+	// 而那一位是谁 nervud 自己知道。
+	//
+	// 放在 Commit 之后：那之前任何一步失败都会走 teardown，而 teardown 会
+	// 撤销登记；登记得太早只会多一次无谓的撤销。
+	if err := c.ep.BindEventScope(streamID, cc.RouteID); err != nil {
+		// 登记失败不该让已经建好的流失败——帧照样流得动，只是订阅不了状态
+		// 事件。记 WARN 让它可见，而不是把一次可用的取流变成失败。
+		c.log.Warn("camerad: 登记事件归属失败，本流的状态事件将订阅不到",
+			"stream_id", streamID, "err", err)
+	}
+
 	c.publishState(streamID, camerav1.StreamPhase_STREAM_PHASE_STARTING)
 	go c.pump(st)
 	return response, nil
@@ -258,8 +272,24 @@ func (c *cameraEndpoint) closeStream(cc sdk.CallContext, payload []byte) ([]byte
 			camerav1.ControlKind_CONTROL_KIND_UNSPECIFIED)
 	}
 	c.teardown(st)
+	// 【先发状态再撤归属】：撤销之后订阅方就收不到了，而 STOPPED 正是它
+	// 最需要的那一条。
 	c.publishState(req.GetStreamId(), camerav1.StreamPhase_STREAM_PHASE_STOPPED)
+	c.releaseScope(req.GetStreamId())
 	return nil, nil
+}
+
+// releaseScope 撤销一条流的事件归属。
+//
+// 【必须显式撤销】：不撤的话，一个反复开关流的 camerad 会让 nervud 的归属表
+// 无界增长。连接断开与 endpoint 撤下会连带清理，但那兜的是崩溃，不是正常关闭。
+func (c *cameraEndpoint) releaseScope(streamID uint64) {
+	if c.ep == nil {
+		return
+	}
+	if err := c.ep.ReleaseEventScope(streamID); err != nil {
+		c.log.Debug("camerad: 撤销事件归属失败", "stream_id", streamID, "err", err)
+	}
 }
 
 // matchFormat 在枚举结果里找【完全一致】的组合。
@@ -390,6 +420,7 @@ func (c *cameraEndpoint) pump(st *stream) {
 			c.publishDeviceError(st.id,
 				camerav1.CameraDeviceErrorKind_CAMERA_DEVICE_ERROR_KIND_DISCONNECTED, dropped)
 			c.publishState(st.id, camerav1.StreamPhase_STREAM_PHASE_FAULT)
+			c.releaseScope(st.id)
 			return
 		}
 
@@ -464,5 +495,6 @@ func (c *cameraEndpoint) closeAll() {
 
 	for _, st := range streams {
 		c.teardown(st)
+		c.releaseScope(st.id)
 	}
 }

@@ -568,10 +568,12 @@ App <--OperationChanged(订阅事件)-- nervud
   重连后「我走的时候它还在跑」）
 - `CancelOperation` 请求取消
 
-> ⚠️ **订阅必须带 `OperationSubscription{operation_id}`**
+> ⚠️ **订阅必须带 `scope = operation_id`**
 >
 > 本接口只有一个内建 endpoint，全机所有 operation 的事件都从它出来。不指定就
 > 会被拒——nervud 在 Subscribe 时就裁决可见性，订一个不属于自己的直接失败。
+> 这是下一节那套通用机制的一个实例，只不过 operation 的归属由内核自己知道，
+> 不用你登记。
 
 > ⚠️ **`CancelOperation` 是请求，不是命令**
 >
@@ -589,6 +591,89 @@ Operation 跟速度、优先级都没关系，也不是专线。所有东西走�
 | Safety Lane | 急停。独立通道，不排队 |
 | Transfer 数据面 | 大数据。摄像头帧不进控制面（第 7 节） |
 | ControlLease + 抢占 | 谁有资格动机器 |
+
+---
+
+## 7.6 一个 endpoint 多实例：事件的实例作用域
+
+一个 endpoint 常常同时管着好几件东西：一路摄像头上开着 4 条 stream，一个机械
+臂上跑着几段轨迹。这些实例的事件全从**同一个 endpoint** 出来。
+
+不做处理的话，订了 `StreamStateChanged` 的 App 会收到这个 endpoint 上**所有**
+流的状态——包括别的 App 开的流。它拿到的是分辨率、帧率、故障时刻，足够拼出
+「另一个应用正在用前置摄像头做什么」。
+
+### 三步
+
+**1. 事件声明 `scoped: true`**
+
+```protobuf
+option (nervus.ipc.v1.event_meta) = {
+  event_id: 1
+  delivery_class: DELIVERY_CLASS_STATE
+  scoped: true            // 按实例分发，不广播
+};
+```
+
+声明了之后，`Subscribe` 不带 scope 会被 nervud 拒；没声明却带了 scope 也会被
+拒。**两个方向都 fail closed**——静默忽略 scope 才是真正危险的那种：调用方以为
+自己在看一条流，实际收到的是全部，而事件本身看起来完全正常，它永远不会发现。
+
+**2. Provider 造出实例时登记归属**
+
+```go
+// openStream：先 Commit 拿到 stream_id，再登记这条流归谁
+if err := c.ep.BindEventScope(streamID, cc.RouteID); err != nil {
+    c.log.Warn("登记事件归属失败，本流的状态事件将订阅不到", "err", err)
+}
+```
+
+`cc.RouteID` 是 `CallContext` 里的当前 route——跟 Transfer 用的是同一个东西。
+nervud 由它反查出调用方是谁，把 `(你, endpoint, scope) -> 调用方` 记下来。
+
+`scope` 用什么值由你定，只要在**这个 endpoint 内**唯一。stream_id 这类你本来
+就要发给调用方的句柄是最自然的选择——调用方不用再学一套编号。
+
+**3. 关掉实例时撤销**
+
+```go
+// 【先发终态事件，再撤归属】
+c.publishState(streamID, camerav1.StreamPhase_STREAM_PHASE_STOPPED)
+c.releaseScope(streamID)   // -> c.ep.ReleaseEventScope(streamID)
+```
+
+顺序反了的话，订阅方收不到 STOPPED——而那正是它最需要的一条。
+
+> ⚠️ **异常路径也要撤**
+>
+> 采集线程遇到 FAULT 直接结束、服务收到关停信号批量关流，这些路径都得走到
+> `ReleaseEventScope`。连接断开和 endpoint 撤下时 nervud 会连带清干净，但那兜
+> 的是崩溃；正常运行期间反复开关流不撤销，归属表会无界增长。
+
+### 消费侧
+
+```go
+sub, err := host.Subscribe(ctx, sdk.SubscribeRequest{
+    EndpointID: epID,
+    EventID:    1,
+    Scope:      streamID,     // 我开的那条流
+})
+```
+
+订一个不属于自己的实例返回 `NOT_FOUND`，**不是** `PERMISSION_DENIED`——后者
+等于告诉调用方「这个实例存在，只是不归你」，那本身就是信息。
+
+### 内核只认指针，不解析你的协议
+
+nervud 不知道 `stream_id` 是什么，也不会去解 `OpenStreamResponse`。它只维护
+一张 `(Provider 连接, endpoint, scope) -> 所有者连接` 的表，`Subscribe` 时查
+一下。所以：
+
+- **归属是连接级的**。调用方断开，它的实例登记随之消失；重连之后要重新开流。
+- **登记未到达 = 订不上**。`BindEventScope` 是单向的，失败只体现为后续订阅
+  返回 `NOT_FOUND`。所以要么在返回句柄前登记，要么把失败告诉调用方，别让它
+  拿着一个永远收不到事件的 stream_id。
+- **重复登记直接覆盖**，不报错。关掉再开同一个编号是你自己的事。
 
 ---
 
@@ -771,6 +856,8 @@ nervusctl list
 - [ ] Provider：有 `providergen/`，manifest 有 `provider` 段
 - [ ] Provider：`RegisterEndpoint` 的 `SchemaHash` == descriptor 里声明的
 - [ ] `MethodMeta.transfer` 的三项预算都非 0（声明了 transfer 的方法）
+- [ ] 一个 endpoint 管多实例的：事件 `scoped: true`，每条正常与异常的关闭路径
+      都走到 `ReleaseEventScope`
 - [ ] `permissions` 里申请了需要的权限
 - [ ] handler 在 `RegisterEndpoint` **之前**全部注册完
 - [ ] Client 的 Resolve 有重试
