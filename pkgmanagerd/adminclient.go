@@ -74,6 +74,18 @@ type Request struct {
 	Enabled     bool   `json:"enabled,omitempty"`
 	Permission  string `json:"permission,omitempty"`
 	GrantState  string `json:"grant_state,omitempty"`
+
+	// ConsentedPermissions 随 install 携带：用户在安装确认屏上点头的那批权限。
+	//
+	// 【本服务只转发，不校验】。哪些条目真的落库由 nervud 决定——它取
+	// 「本清单 ∩ 安装期授予集合 ∩ USER_CONSENT」的交集，越界的静默忽略
+	// （见 nervud 的 pkgregistry.Module.applyInstallConsent）。在这里预先
+	// 过滤只会产生第二个真相源：本服务看不到 Catalog，判不出一条权限是哪一档。
+	//
+	// json tag 必须与 nervud 的 adminwire.Request 逐字一致——本结构体是那份的
+	// 手抄副本（internal 包跨模块 import 不了），字段名对不上不会报错，
+	// 只会让同意清单静默丢失，症状是「装完了但权限还是没有」。
+	ConsentedPermissions []string `json:"consented_permissions,omitempty"`
 }
 
 // Response 是 nervud 的应答。

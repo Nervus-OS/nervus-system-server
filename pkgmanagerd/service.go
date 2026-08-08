@@ -69,12 +69,12 @@ var ErrUnsafeRelPath = errors.New("nspkg_relpath escapes the handoff directory")
 // 路径校验在这里做一次（拒绝绝对路径与 ".." 逃逸），nervud 侧还会再做一次。
 // 两道是有意的：本服务的进程内可能有别的 bug 把 relPath 改坏，而 nervud 那道
 // 是跨信任边界的最终防线。
-func (s *Service) InstallFromRelPath(relPath string) (*PackageInfo, error) {
+func (s *Service) InstallFromRelPath(relPath string, consented []string) (*PackageInfo, error) {
 	nspkgPath, err := resolveHandoff(relPath)
 	if err != nil {
 		return nil, err
 	}
-	return s.installFile(nspkgPath)
+	return s.installFile(nspkgPath, consented)
 }
 
 // resolveHandoff 把交接目录内的相对路径解析成绝对路径，拒绝一切逃逸。
@@ -95,7 +95,12 @@ func resolveHandoff(relPath string) (string, error) {
 	return cleaned, nil
 }
 
-func (s *Service) installFile(nspkgPath string) (*PackageInfo, error) {
+// installFile 是 install 的公共实现。
+//
+// consented 原样转给 nervud：本服务【不预判也不复核】它。哪些条目真正落成
+// GRANTED 由内核按 Catalog 决定（同意清单 ∩ 安装期授予集合 ∩ USER_CONSENT 的
+// 交集，越界的静默忽略），在这里筛一遍只会产生第二个会漂移的真相源。
+func (s *Service) installFile(nspkgPath string, consented []string) (*PackageInfo, error) {
 	// 1. 让 nervud 建 staging 目录。
 	//
 	// 【必须由 nervud 建，不能自己挑一个】。它保证三件事：位置与 PackageRoot
@@ -125,6 +130,11 @@ func (s *Service) installFile(nspkgPath string) (*PackageInfo, error) {
 	res, err := s.admin.Do(Request{
 		Cmd:        CmdInstall,
 		StagingDir: staging,
+		// 原样转发，不做任何过滤：本服务【不知道】哪条权限是 USER_CONSENT，
+		// 也不该知道——那是 Catalog 的事实。nervud 只落「同意清单 ∩ 安装期
+		// 授予集合 ∩ USER_CONSENT」的交集，越界条目静默忽略，所以这里过滤
+		// 一遍只会多出一个可能与内核判据漂移的副本。
+		ConsentedPermissions: consented,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("install: %w", err)

@@ -28,7 +28,12 @@ func registerHandlers(host *sdk.ServiceHost, svc *Service, log *slog.Logger) {
 		if err := proto.Unmarshal(payload, &req); err != nil {
 			return nil, invalidArgument()
 		}
-		info, err := svc.InstallFromRelPath(req.GetNspkgRelpath())
+		// consented_permissions 原样转发。本服务不复核它：谁有资格填这个字段
+		// 由 nervud 的 needs_user_confirmation 门决定（只对持
+		// perm.permission.admin 的调用方放行，即系统的确认界面），而哪些条目
+		// 真正落库由 Catalog 决定。在这里加一层判断只会产生第二个真相源。
+		info, err := svc.InstallFromRelPath(
+			req.GetNspkgRelpath(), req.GetConsentedPermissions())
 		if err != nil {
 			return nil, mapErr(err, log, "install")
 		}
