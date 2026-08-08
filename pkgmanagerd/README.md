@@ -131,9 +131,10 @@ fail closed 回 `NOT_FOUND`——「这个方法不存在」正是此刻的事�
 
 - [ ] `method_id` 与 `service.go` 里的 `MethodInstall` 等常量对齐，**以 proto 为准**
 - [ ] 按 `method_registry` 机制挂 `method_meta`（权限、风险级、是否需用户确认）
-- [ ] `main.go` 的 `RegisterEndpoint` 填上 `SchemaHash`。内核目前
-      **只记录不比对**（`register.go` 步骤 5：v1 尚无权威 schema Registry），
-      所以现在留空不会被拒；schema Registry 落地后比对会开启，届时不填就注册不上
+- [x] `main.go` 的 `RegisterEndpoint` 填上 `SchemaHash`。见 `contract.go` 的
+      `schemaHash()`，与 `providergen` 走同一个 `BuildSchemaBundle` 调用。
+      内核步骤 5 **逐字节比对**，留空即 `FAILED_PRECONDITION`——放行本包空 hash
+      的兼容桥已随 v2 移除
 
 ## 内核凭什么让它注册
 

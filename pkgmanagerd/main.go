@@ -97,18 +97,25 @@ func run(sockPath, adminSock string, log *slog.Logger) error {
 	// 这个方法不存在，而不是「服务还没准备好」，这种错误很难往回追。
 	registerHandlers(host, svc, log)
 
+	// 在报到之前算，算不出来就直接失败：带着空 hash 去报到只会换来一句
+	// FAILED_PRECONDITION，而那条错误指向 Catalog，不指向这里。
+	hash, err := schemaHash()
+	if err != nil {
+		return err
+	}
+
 	regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	epID, err := host.RegisterEndpoint(regCtx, sdk.RegisterRequest{
 		InterfaceID: interfaceID,
-		Major:       1,
+		Major:       interfaceMajor,
+		// SchemaHash 是必填且被逐字节比对的。内核步骤 5 拿它与 Catalog 里那份
+		// 比，不符即 FAILED_PRECONDITION——曾经放行 nervus.pkgmanagerd 空 hash
+		// 的兼容桥已随 v2 移除，所有 Provider 一视同仁。
+		SchemaHash: hash,
 		// ResourceHandle 留空 = 未指定。内核 RegisterEndpoint 步骤 4 只在非空时
 		// 校验它必须是 Resource Registry 里的已知句柄；本接口不绑任何物理资源，
 		// 填一个反而会因为不在表里被 INVALID_ARGUMENT 拒掉。
-		//
-		// SchemaHash 留空：内核步骤 5 目前【只记录不比对】（v1 尚无权威 schema
-		// Registry）。schema Registry 落地后比对会开启，届时必须填上本接口
-		// descriptor 的真实 hash，否则注册不上。
 	})
 	if err != nil {
 		return fmt.Errorf("注册 endpoint: %w", err)
